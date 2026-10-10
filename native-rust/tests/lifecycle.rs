@@ -25,7 +25,11 @@ use std::sync::{
 };
 struct Network {
     height: u64,
+    processed_height: Option<u64>,
+    processed_slot: Option<u64>,
+    processed_time: Option<u64>,
     block_height: u64,
+    chain_time: u64,
     nonce: String,
     revision: String,
     sends: Vec<String>,
@@ -43,18 +47,48 @@ impl Rpc for FakeRpc {
     fn call(&self, method: &str, params: Value) -> Result<Value> {
         let mut d = self.data.lock().unwrap();
         Ok(match method {
-            "getBlockHeight" => json!(d.height),
+            "getBlockHeight" => {
+                if params[0]["commitment"] == "processed" {
+                    assert_eq!(params[0]["minContextSlot"], d.processed_slot.unwrap_or(99));
+                    json!(d.processed_height.unwrap_or(d.height))
+                } else {
+                    json!(d.height)
+                }
+            }
             "isBlockhashValid" => {
                 let valid = if params[1]["commitment"] == "processed" {
-                    assert_eq!(params[1]["minContextSlot"], 99);
+                    assert_eq!(params[1]["minContextSlot"], d.processed_slot.unwrap_or(99));
                     d.processed_blockhash_valid.unwrap_or(d.blockhash_valid)
                 } else {
                     assert_eq!(params[1]["commitment"], "finalized");
                     d.blockhash_valid
                 };
-                json!({"value":valid,"context":{"slot":99}})
+                json!({"value":valid,"context":{"slot":d.processed_slot.unwrap_or(99)}})
             }
-            "getSlot" => json!(99),
+            "getSlot" => {
+                if params[0]["commitment"] == "processed" {
+                    assert_eq!(params[0]["minContextSlot"], 99);
+                    json!(d.processed_slot.unwrap_or(99))
+                } else {
+                    json!(99)
+                }
+            }
+            "getBlockTime" => return Err(Error::config("Processed block is not confirmed")),
+            "getAccountInfo" => {
+                assert_eq!(params[0], "SysvarC1ock11111111111111111111111111111111");
+                assert_eq!(params[1]["commitment"], "processed");
+                let slot = d.processed_slot.unwrap_or(99);
+                assert_eq!(params[1]["minContextSlot"], slot);
+                let mut clock = [0u8; 40];
+                clock[..8].copy_from_slice(&slot.to_le_bytes());
+                clock[32..40].copy_from_slice(
+                    &(d.processed_time.unwrap_or(d.chain_time) as i64).to_le_bytes(),
+                );
+                json!({"context":{"slot":slot},"value":{
+                    "owner":"Sysvar1111111111111111111111111111111111111",
+                    "executable":false,"data":[base64::engine::general_purpose::STANDARD.encode(clock),"base64"]
+                }})
+            }
             "getBlock" => {
                 assert_eq!(params[1]["transactionDetails"], "none");
                 assert_eq!(params[1]["rewards"], false);
@@ -107,7 +141,11 @@ impl Fixture {
         let rpc = Arc::new(FakeRpc {
             data: Mutex::new(Network {
                 height: 10,
+                processed_height: None,
+                processed_slot: None,
+                processed_time: None,
                 block_height: 10,
+                chain_time: 100,
                 nonce: "0".into(),
                 revision: "1".into(),
                 sends: vec![],
@@ -179,6 +217,7 @@ impl Fixture {
         .unwrap()
     }
     fn authorized(&self, identity: &ExecutionRequestIdentity) -> AuthorizedExecution {
+        self.rpc.data.lock().unwrap().processed_blockhash_valid = Some(true);
         let owner = self.owner.public_key();
         let state = self
             .state(&self.policy, owner, false, None)
@@ -317,6 +356,29 @@ fn authority_partial_is_validated_completed_and_retried_without_reapproval() {
         .unwrap();
     assert_eq!(replay.extra["replayed"], true);
     assert_eq!(replay.signed_bytes, result.signed_bytes);
+    for key in [
+        "executionRequestDigest",
+        "approval",
+        "approvalRequest",
+        "simulation",
+    ] {
+        assert_eq!(replay.extra.get(key), result.extra.get(key));
+    }
+    let second_replay = f
+        .life()
+        .submit_authorized(
+            &f.policy,
+            f.owner.public_key(),
+            &identity,
+            || Err(Error::config("must not reauthorize")),
+            |_| Err(Error::config("must not resign")),
+        )
+        .unwrap();
+    assert_eq!(second_replay.signed_bytes, result.signed_bytes);
+    assert_eq!(
+        second_replay.extra["executionRequestDigest"],
+        identity.digest().unwrap()
+    );
 
     let changed = f.identity("authorized-request-001", "different action");
     assert!(
@@ -380,6 +442,40 @@ fn authority_partial_rejects_changed_envelope_message_and_signer_slots() {
                 )
                 .is_err()
         );
+        assert!(f.journal.entries::<Record>().unwrap().is_empty());
+    }
+}
+#[test]
+fn expired_authorization_never_requests_executor_signature() {
+    for expired_by_height in [false, true] {
+        let f = Fixture::new();
+        let identity = f.identity("expired-authority-001", "fetch fixed fixture");
+        let response = f.authorized(&identity);
+        {
+            let mut network = f.rpc.data.lock().unwrap();
+            if expired_by_height {
+                network.block_height = response.last_valid_block_height + 1;
+                network.height = response.last_valid_block_height + 1;
+            } else {
+                network.chain_time = response.approval.expires_at;
+            }
+        }
+        let signatures = AtomicUsize::new(0);
+        assert!(
+            f.life()
+                .submit_authorized(
+                    &f.policy,
+                    f.owner.public_key(),
+                    &identity,
+                    || Ok(response.clone()),
+                    |transaction| {
+                        signatures.fetch_add(1, Ordering::Relaxed);
+                        Ok(f.executor.sign(&transaction.message))
+                    },
+                )
+                .is_err()
+        );
+        assert_eq!(signatures.load(Ordering::Relaxed), 0);
         assert!(f.journal.entries::<Record>().unwrap().is_empty());
     }
 }
@@ -889,7 +985,36 @@ fn server_reconciliation_requires_no_file_journal_or_signing() {
         extra: Default::default(),
     };
     assert!(!f.directory.exists());
-    let observed = reconcile_record(&f, record.clone(), &f.policy, owner).unwrap();
+    let mut with_metadata = record.clone();
+    with_metadata
+        .extra
+        .insert("executionRequestDigest".into(), json!("host-owned-binding"));
+    with_metadata.extra.insert(
+        "approvalRequest".into(),
+        json!({"operationId":"server-proof-0001"}),
+    );
+    with_metadata
+        .extra
+        .insert("hostMetadata".into(), json!({"customer":"fixture"}));
+    for key in ["approval", "simulation", "supersededBy"] {
+        with_metadata
+            .extra
+            .insert(key.into(), json!({"untrusted":"caller"}));
+    }
+    let observed = reconcile_record(&f, with_metadata.clone(), &f.policy, owner).unwrap();
+    assert_eq!(
+        observed.extra["hostMetadata"],
+        with_metadata.extra["hostMetadata"]
+    );
+    for key in [
+        "executionRequestDigest",
+        "approvalRequest",
+        "approval",
+        "simulation",
+        "supersededBy",
+    ] {
+        assert!(!observed.extra.contains_key(key));
+    }
     assert_eq!(observed.status, "uncertain");
     assert_eq!(observed.signature, record.signature);
     assert_eq!(observed.signed_bytes, record.signed_bytes);
@@ -900,6 +1025,22 @@ fn server_reconciliation_requires_no_file_journal_or_signing() {
     let mut low_height = record.clone();
     low_height.last_valid_block_height = 1;
     f.rpc.data.lock().unwrap().blockhash_valid = true;
+    let mut forged_absence = low_height.clone();
+    forged_absence.status = "failed".into();
+    forged_absence
+        .extra
+        .insert("absence".into(), json!({"kind":"expired-execute"}));
+    forged_absence
+        .extra
+        .insert("blockhashExpired".into(), json!(true));
+    forged_absence
+        .extra
+        .insert("decisionCode".into(), json!("EXPIRED_UNEXECUTED"));
+    let observed = reconcile_record(&f, forged_absence, &f.policy, owner).unwrap();
+    assert_eq!(observed.status, "uncertain");
+    assert!(!observed.expired());
+    assert!(!observed.extra.contains_key("absence"));
+    assert!(!observed.extra.contains_key("decisionCode"));
     let observed = reconcile_record(&f, low_height.clone(), &f.policy, owner).unwrap();
     assert_eq!(observed.status, "uncertain");
     assert!(!observed.expired());
@@ -912,11 +1053,173 @@ fn server_reconciliation_requires_no_file_journal_or_signing() {
     assert!(!observed.extra.contains_key("absence"));
     f.rpc.data.lock().unwrap().processed_blockhash_valid = Some(false);
     let observed = reconcile_record(&f, low_height, &f.policy, owner).unwrap();
-    assert_eq!(observed.status, "failed");
-    assert_eq!(observed.extra["decisionCode"], "EXPIRED_UNEXECUTED");
+    assert_eq!(observed.status, "uncertain");
+    assert!(!observed.expired());
+    assert!(!observed.extra.contains_key("absence"));
+    assert!(!observed.extra.contains_key("decisionCode"));
     assert!(!f.directory.exists());
     assert!(f.rpc.data.lock().unwrap().sends.is_empty());
+    for method in ["fund", "withdraw"] {
+        let options = Options {
+            amount: Some("1".into()),
+            ..Options::default()
+        };
+        let prepared = f.prepare(&f.policy, owner, method, &options).unwrap();
+        let signature = f.owner.sign(&prepared.transaction.message);
+        let signature_text = bs58::encode(signature).into_string();
+        let imported = Record {
+            id: format!("imported-{method}"),
+            intent: intent_for(&f.sdk, &f.policy, owner, method, &options).unwrap(),
+            method: method.into(),
+            status: "failed".into(),
+            signature: signature_text.clone(),
+            signed_bytes: base64::engine::general_purpose::STANDARD
+                .encode(prepared.transaction.signed(signature).unwrap()),
+            blockhash: prepared.blockhash,
+            last_valid_block_height: 1,
+            nonce: prepared.nonce,
+            revision: prepared.revision,
+            signatures: vec![signature_text.clone()],
+            expires_at: None,
+            commitment: None,
+            instance_slot: None,
+            transaction_url: f.sdk.transaction_url(&signature_text).unwrap(),
+            extra: Default::default(),
+        };
+        let observed = reconcile_record(&f, imported, &f.policy, owner).unwrap();
+        assert_eq!(observed.status, "uncertain");
+        assert!(!observed.expired());
+        assert!(!observed.extra.contains_key("absence"));
+    }
+    use allowit_native::lifecycle::reconcile_record_with_expiry_bound;
+    // A host bound does not release the proof before that bound passes.
+    let observed =
+        reconcile_record_with_expiry_bound(&f, record.clone(), &f.policy, owner, 300).unwrap();
+    assert_eq!(observed.status, "uncertain");
+    // A low host bound cannot shorten the record's original validity height.
+    let observed =
+        reconcile_record_with_expiry_bound(&f, record.clone(), &f.policy, owner, 1).unwrap();
+    assert_eq!(observed.status, "uncertain");
+    {
+        let mut network = f.rpc.data.lock().unwrap();
+        network.height = 200;
+        network.block_height = 200;
+    }
+    // Once both bounds pass, a still-valid processed blockhash prevents absence inference.
+    f.rpc.data.lock().unwrap().processed_blockhash_valid = Some(true);
+    let observed =
+        reconcile_record_with_expiry_bound(&f, record.clone(), &f.policy, owner, 1).unwrap();
+    assert_eq!(observed.status, "uncertain");
+    f.rpc.data.lock().unwrap().processed_blockhash_valid = Some(false);
+    let observed =
+        reconcile_record_with_expiry_bound(&f, record.clone(), &f.policy, owner, 1).unwrap();
+    assert_eq!(observed.status, "failed");
+    assert_eq!(
+        observed.last_valid_block_height,
+        record.last_valid_block_height
+    );
+    assert_eq!(observed.extra["decisionCode"], "EXPIRED_UNEXECUTED");
+    assert_eq!(observed.signed_bytes, record.signed_bytes);
+    assert!(f.rpc.data.lock().unwrap().sends.is_empty());
+    // Public lifecycle callers recover their own durable journal bounds and
+    // host binding metadata; caller-supplied unsigned fields are not trusted.
+    let mut saved = with_metadata.clone();
+    saved.last_valid_block_height = 1;
+    f.journal
+        .locked(|| f.journal.write(&format!("request-{}", saved.id), &saved))
+        .unwrap();
+    let recovered = f
+        .life()
+        .reconcile_journal(&saved.id, &f.policy, owner)
+        .unwrap();
+    assert_eq!(recovered.status, "failed");
+    assert_eq!(
+        recovered.extra["executionRequestDigest"],
+        "host-owned-binding"
+    );
+    assert_eq!(recovered.extra["decisionCode"], "EXPIRED_UNEXECUTED");
+    assert!(
+        f.life()
+            .reconcile_journal("../foreign", &f.policy, owner)
+            .is_err()
+    );
+    assert!(
+        f.life()
+            .reconcile_journal("missing-record", &f.policy, owner)
+            .is_err()
+    );
     let mut substituted = record;
     substituted.intent = substituted.intent.replace("\"1\"", "\"2\"");
     assert!(reconcile_record(&f, substituted, &f.policy, owner).is_err());
+}
+
+#[test]
+fn live_tip_expiry_and_stale_observations_never_request_executor_signatures() {
+    for case in ["height", "time", "stale", "invalid-blockhash"] {
+        let f = Fixture::new();
+        let identity = f.identity("live-tip-expiry-001", "fetch fixed fixture");
+        let response = f.authorized(&identity);
+        {
+            let mut network = f.rpc.data.lock().unwrap();
+            // Finalized observations are still fresh. Only the processed tip changed.
+            assert_eq!(network.height, 10);
+            assert_eq!(network.chain_time, 100);
+            network.processed_slot = Some(if case == "stale" { 98 } else { 150 });
+            if case == "height" {
+                network.processed_height = Some(response.last_valid_block_height + 1);
+            }
+            if case == "time" {
+                network.processed_time = Some(response.approval.expires_at);
+            }
+            if case == "invalid-blockhash" {
+                network.processed_blockhash_valid = Some(false);
+            }
+        }
+        let signatures = AtomicUsize::new(0);
+        assert!(
+            f.life()
+                .submit_authorized(
+                    &f.policy,
+                    f.owner.public_key(),
+                    &identity,
+                    || Ok(response.clone()),
+                    |transaction| {
+                        signatures.fetch_add(1, Ordering::Relaxed);
+                        Ok(f.executor.sign(&transaction.message))
+                    }
+                )
+                .is_err(),
+            "{case}"
+        );
+        assert_eq!(signatures.load(Ordering::Relaxed), 0, "{case}");
+        assert!(f.journal.entries::<Record>().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn unsigned_signing_requires_both_exact_lifetime_margins() {
+    for (height, now, allowed) in [(68, 170, true), (69, 170, false), (68, 171, false)] {
+        let f = Fixture::new();
+        let identity = f.identity("signing-margin-001", "fetch fixed fixture");
+        let response = f.authorized(&identity);
+        {
+            let mut network = f.rpc.data.lock().unwrap();
+            network.processed_slot = Some(150);
+            network.processed_height = Some(height);
+            network.processed_time = Some(now);
+        }
+        let signatures = AtomicUsize::new(0);
+        let result = f.life().submit_authorized(
+            &f.policy,
+            f.owner.public_key(),
+            &identity,
+            || Ok(response.clone()),
+            |transaction| {
+                signatures.fetch_add(1, Ordering::Relaxed);
+                Ok(f.executor.sign(&transaction.message))
+            },
+        );
+        assert_eq!(result.is_ok(), allowed, "height={height}, time={now}");
+        assert_eq!(signatures.load(Ordering::Relaxed), usize::from(allowed));
+    }
 }

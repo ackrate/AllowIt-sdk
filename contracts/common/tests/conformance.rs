@@ -291,3 +291,27 @@ fn qualified_functions_keep_chain_artifact_and_request_bindings() {
         Err(Error::BindingMismatch)
     );
 }
+
+#[test]
+fn source_registry_minor_version_retains_existing_artifact_acceptance() {
+    let state = fixture(SIMPLE);
+    let mut artifact: allowit_contract_core::Artifact =
+        serde_json::from_slice(&state.artifact).unwrap();
+    assert_eq!(artifact.registry_version, "1.2.0");
+    assert_eq!(artifact.ir.version, "1.0.0");
+    for version in ["1.0.0", "1.1.0"] {
+        let mut legacy = state.clone();
+        artifact.registry_version = version.into();
+        legacy.mandate.registry_version = version.into();
+        legacy.artifact = serde_json::to_vec(&artifact).unwrap();
+        legacy.mandate.artifact_hash = allowit_sdk::digest(&legacy.artifact);
+        allowit_contract_core::validate_chain_artifact(&legacy.mandate, &legacy.artifact).unwrap();
+        assert!(prepare_execution(&legacy, &request(&legacy, 1_000_000), 1000).is_ok());
+    }
+    let mut unsupported = state;
+    unsupported.mandate.registry_version = "1.3.0".into();
+    assert_eq!(
+        allowit_contract_core::validate_chain_artifact(&unsupported.mandate, &unsupported.artifact),
+        Err(Error::InvalidMandate)
+    );
+}

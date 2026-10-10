@@ -99,3 +99,5 @@ before asking for any signature. `Prepared.simulation` reports
 or any simulation error fails preparation. Simulation disables signature
 verification only so the pre-sign message can run, and does not replace the
 recent blockhash.
+
+Before signing a server-authorized execution, the native lifecycle checks the processed chain tip at or after the simulation context slot. The blockhash must remain valid. At least 32 block heights and 30 seconds must remain in the two expiry bounds. An unavailable or stale observation requires fresh authorization. Recovery of an existing signed proof still uses finalized observations.

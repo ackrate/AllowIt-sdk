@@ -19,4 +19,5 @@ jobs:
           workspaces: native-rust -> target
       - run: cargo fmt --manifest-path native-rust/Cargo.toml --check
       - run: cargo test --manifest-path native-rust/Cargo.toml --locked
+      - run: cargo test --manifest-path native-rust/Cargo.toml --locked -p allowit-paysh-interface
       - run: cargo clippy --manifest-path native-rust/Cargo.toml --locked --all-targets -- -D warnings

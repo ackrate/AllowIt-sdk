@@ -24,22 +24,26 @@ and records standing approval atomically in one owner-signed transaction.
 
 ## Owner CLI
 
-Node >=22 is required. Install with `npm ci` in this directory. The Go `allowit`
-action CLI dispatches to this SDK (`ALLOWIT_SDK_CLI` absolute path, or a shipped
-`native-sdk/cli.mjs` beside the Go executable). The Rust compiler CLI is separate. To ship the Go binary and SDK together, run
-`node native/scripts/build-bundle.mjs OUTPUT_DIRECTORY` from the SDK repository
-with `ALLOWIT_CLI_SOURCE` set to the checked-out Go CLI repository.
+File journals require a local POSIX filesystem. Native Windows journals are not supported.
+On Windows, run the CLI in Linux/WSL. Keep policy and journal state in the Linux filesystem, not `/mnt/c` or `/mnt/d`.
+Do not delete an existing Windows journal after an error. Keep its signed proofs and reconcile uncertain operations before another submission.
+The platform check runs before the CLI reads keys, writes state, or contacts RPC.
+
+Node >=22 is required for this compatibility SDK. Install with `npm ci` in this
+directory and run its client with `node cli.mjs`. The separate Rust
+[`allowit` action CLI](https://github.com/AllowIt-hq/allowit-cli) uses the vendored
+Rust transport. The repository's Rust compiler CLI is a developer tool.
 
 ```sh
-allowit policy generate 'Spend up to 5 test tokens per day with PaySH discovery'
+node cli.mjs policy generate 'Spend up to 5 test tokens per day with PaySH discovery'
 # Or retain the exact browser instance:
-# allowit policy import executor.json
-allowit policy deploy
-allowit policy fund 10
-allowit policy execute RECIPIENT_TOKEN_ACCOUNT 2
-allowit policy status
-allowit policy revoke
-allowit policy withdraw 8
+# node cli.mjs policy import executor.json
+node cli.mjs policy deploy
+node cli.mjs policy fund 10
+node cli.mjs policy execute RECIPIENT_TOKEN_ACCOUNT 2
+node cli.mjs policy status
+node cli.mjs policy revoke
+node cli.mjs policy withdraw 8
 ```
 
 Generate prints Rust and parameters and saves policy.json. Deploy prints the

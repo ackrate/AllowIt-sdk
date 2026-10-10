@@ -73,12 +73,19 @@ impl Rpc for FakeRpc {
                     json!(99)
                 }
             }
-            "getBlockTime" => {
-                if Some(params[0].as_u64().unwrap()) == d.processed_slot {
-                    json!(d.processed_time.unwrap_or(d.chain_time))
-                } else {
-                    json!(d.chain_time)
-                }
+            "getBlockTime" => panic!("Processed block time is unavailable; use Clock"),
+            "getAccountInfo" => {
+                assert_eq!(params[0], "SysvarC1ock11111111111111111111111111111111");
+                assert_eq!(params[1]["commitment"], "processed");
+                let slot = d.processed_slot.unwrap_or(99);
+                assert_eq!(params[1]["minContextSlot"], slot);
+                let mut clock = vec![0u8; 40];
+                clock[..8].copy_from_slice(&slot.to_le_bytes());
+                clock[32..40].copy_from_slice(
+                    &(d.processed_time.unwrap_or(d.chain_time) as i64).to_le_bytes(),
+                );
+                json!({"context":{"slot":slot},"value":{"owner":"Sysvar1111111111111111111111111111111111111",
+                    "data":[base64::engine::general_purpose::STANDARD.encode(clock),"base64"]}})
             }
             "getBlock" => {
                 assert_eq!(params[1]["transactionDetails"], "none");
@@ -322,6 +329,16 @@ fn authority_partial_is_validated_completed_and_retried_without_reapproval() {
     assert_eq!(approvals.load(Ordering::Relaxed), 1);
     assert_eq!(signatures.load(Ordering::Relaxed), 1);
     assert_eq!(result.signatures.len(), 2);
+    let observed = f
+        .life()
+        .reconcile_journal(&result.id, &f.policy, f.owner.public_key())
+        .unwrap();
+    assert_eq!(
+        observed.extra["executionRequestDigest"],
+        identity.digest().unwrap()
+    );
+    assert!(observed.extra.contains_key("approval"));
+    assert_eq!(f.rpc.data.lock().unwrap().sends.len(), 1);
     assert_eq!(
         result.extra["executionRequestDigest"],
         identity.digest().unwrap()

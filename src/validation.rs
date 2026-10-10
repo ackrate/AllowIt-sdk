@@ -693,6 +693,14 @@ impl Validator {
                         }
                     }
                     if let Expr::String { value } = &args[0] {
+                        if !value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
+                        {
+                            return Err(bad(
+                                "Provider service identifiers require ASCII letters, digits or ._:/-.",
+                            ));
+                        }
                         if self.provider_call_ids.len() >= 8
                             || self.provider_call_ids.contains(value)
                         {

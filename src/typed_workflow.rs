@@ -618,6 +618,18 @@ pub(crate) fn curl_shape(request: &CurlRequest) -> bool {
         })
 }
 
+/// Bound untrusted response bytes before JSON serialization or hashing.
+pub(crate) fn curl_outcome_shape(outcome: &CurlOutcome) -> bool {
+    match outcome {
+        CurlOutcome::Complete(response) => response.body.len() <= 65536,
+        CurlOutcome::PaymentRequired(challenge) => {
+            challenge.authenticated_wire_bytes.len() <= 8192
+                && challenge.gateway_origin.len() <= 4096
+                && challenge.endpoint_path.len() <= 4096
+        }
+    }
+}
+
 /// Nominal declaration order is stable for registry 1.4. UI colors are presentation only.
 pub fn type_declarations() -> Vec<String> {
     [
@@ -670,6 +682,15 @@ pub fn request_digest(
     request: &Option<CurlRequest>,
     outcome: &Option<CurlOutcome>,
 ) -> Result<Digest, WorkflowError> {
+    if outcome
+        .as_ref()
+        .is_some_and(|value| !curl_outcome_shape(value))
+    {
+        return Err(WorkflowError::new(
+            "WORKFLOW_INPUT_LIMIT",
+            "Typed HTTP response exceeds its bounded shape",
+        ));
+    }
     let document = (
         &binding.installation_id,
         &binding.run_id,

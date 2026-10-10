@@ -21,7 +21,7 @@ async fn _execute(ctx: &Context, params: &PolicyParams) -> PolicyResult {
 }
 ```
 
-The Go [action CLI](https://github.com/AllowIt-hq/allowit-cli) is a separate client for `allowit show`, `eval`, `exec` and `status`. This repository's Rust CLI is a developer compiler/evaluator tool; use the repository-local Cargo commands below so the two executables are not confused. The app server owns HTTP transport. Hosted-agent control and runtime are optional, outside the MVP; they are not SDK responsibilities. Restricted Rust remains the policy source and enforcement language.
+The Rust [action CLI](https://github.com/AllowIt-hq/allowit-cli) is a separate client for `allowit show`, `eval`, `exec` and `status`. This repository's Rust CLI is a developer compiler/evaluator tool; use the repository-local Cargo commands below so the two executables are not confused. The app server owns HTTP transport. Hosted-agent control and runtime are optional, outside the MVP; they are not SDK responsibilities. Restricted Rust remains the policy source and enforcement language.
 
 ## Policy source and configuration
 
@@ -48,7 +48,7 @@ fn new() -> PolicyParams {
 
 Inside the handler, `allowit::stored_limit(ctx, params.action_limit)?` returns the current owner-controlled primitive. The native adapter supplies verified account state through `Context.native_policy_storage`. The JSON protocol rejects `native_policy_storage`. Trusted adapters use the typed evaluator. Request JSON and `runtime_context` are not storage. The adapter checks constructor defaults against the original installation and reads current limits after owner-authorized updates. Only the two named native fields are admitted. Missing state fails closed. The portable contract profile rejects native storage, including unreachable reads.
 
-The registry identifies this source profile as 1.2.0. Historical one-argument source profiles retain their old compiler semantics for artifact validation and recovery. Current primitive Rust exports do not reproduce historical whole-context signatures. New generation uses the constructor profile. Typed vendor movements require their own implemented source and execution binding.
+The registry identifies this source profile as 1.4.0. Historical one-argument source profiles retain their old compiler semantics for artifact validation and recovery. Current primitive Rust exports do not reproduce historical whole-context signatures. New generation uses the constructor profile. Typed vendor movements require their own implemented source and execution binding.
 
 ## Run
 
@@ -85,7 +85,7 @@ Each registered policy function accepts an explicit `allowit::` prefix. `jev::se
 
 Namespaces identify policy checks. A core check such as `allowit::allow_actions` compares exact labels. It does not execute or classify a vendor operation. PaySH and other vendor prefixes require concrete operations with their own bounded implementation and execution bindings. The restricted compiler rejects `paysh::pay`, `paysh::swap` and other unregistered vendor calls. Native vendor transport requires a separate execution interface.
 
-Source registry 1.2.0 requires compatible rebuilt rail contracts. Contracts that
+Source registry 1.4.0 requires compatible rebuilt rail contracts. Contracts that
 accept only registry 1.0.0 reject these new artifacts. This change does not deploy contracts.
 
 Qualified calls preserve the current interpreter, contract opcodes and execution requirements. Source spans and source hashes still bind the exact policy text. Changing the spelling therefore requires a new compiled artifact and the corresponding mandate binding. Solana and Stellar adapters consume that artifact through the shared contract core. A Near adapter requires its own host, asset, authorization and settlement integration.
@@ -157,7 +157,7 @@ Hosts must bind each trace to the request, evaluation attempt and approved revis
 
 Contract adapters use `default-features = false`, `validate_program`, `canonical_ir_hash` and `evaluate_ir`. The contract must authenticate the IR artifact during owner activation and bind it to the action, owner, network, asset, current budget, original intent, runtime-context digest and authority. The `no_std` evaluator validates the complete IR but does not contain the source parser; it does not claim to recompile source on chain. Source digests are owner-bound metadata there. Native `evaluate` recompiles source to reject a forged source/IR correspondence and is available only with the compiler feature.
 
-The registered `paysh::call(service_id, input_key, max_payment_units, max_swap_lamports, max_service_fee_lamports_per_execution) -> bool` admits a paid provider plan. Its five arguments use two strings and three integer ceilings, each written as a literal or initialized constructor constant. The admitted plan binds `payment_units` to the trusted amount evaluated by policy guards; that amount must be positive and within the source ceiling. Supply `Context.provider_call_input` only from an authenticated typed host adapter, with the canonical input digest. Public JSON evaluation rejects this binding. `CompiledPolicy.provider_call_requirements` exposes source constants from validated IR before funding. `evaluate_with_trace` returns `Decision.system_operations` only after all executed policy checks pass. Owner/evidence pauses and refusals expose no effects. The adapter must bind the plan to the authenticated run and settle exactly `payment_units`, enforce its ceilings and native wallet limits, deduplicate settlement by run and canonical input digest, and record payment and delivery separately. The fifth argument limits each native settlement execution fee. The current native adapter uses at most two settlement executions, and the owner-signed envelope binds their actual count and total fee; native period fee and total SOL caps still apply. One provider call is supported per policy. Contract evaluation rejects this host operation; a fixed native wallet settles the adapter's signed bounded request rather than executing arbitrary Rust. The direct Rust source facade returns false because it has no authenticated host adapter.
+The registered `paysh::call(service_id, input_key, max_payment_units, max_swap_lamports, max_service_fee_lamports_per_execution) -> bool` admits a paid provider plan. Its five arguments use two strings and three integer ceilings, each written as a literal or initialized constructor constant. The admitted plan binds `payment_units` to the trusted amount evaluated by policy guards; that amount must be positive and within the source ceiling. Supply `Context.provider_call_input` only from an authenticated typed host adapter, with the canonical input digest. Public JSON evaluation rejects this binding. `CompiledPolicy.provider_call_requirements` exposes source constants from validated IR before funding. `evaluate_with_trace` returns `Decision.system_operations` only after all executed policy checks pass. Owner/evidence pauses and refusals expose no effects. The adapter must bind the plan to the authenticated run and settle exactly `payment_units`, enforce its ceilings and native wallet limits, deduplicate settlement by run and canonical input digest, and record payment and delivery separately. The fifth argument limits each native settlement execution fee. The external host adapter must bind service identity, exact mint/network, payment amount, swap and service-fee ceilings, and the authenticated run/input to each evaluator-signed native request. The owner signs installed configuration, not each execution. Native requests do not enforce operation-ID uniqueness; the host must persist a single nonce for each run/input/step and reuse it for replacements. Native period fee and total SOL caps still apply. At most one provider call executes per policy evaluation; separate branches may contain distinct call sites. Contract evaluation rejects this host operation; a fixed native wallet settles the adapter's signed bounded request rather than executing arbitrary Rust. The direct Rust source facade returns false because it has no authenticated host adapter.
 
 ## WebAssembly
 
@@ -178,7 +178,7 @@ The artifact is `target/wasm32-unknown-unknown/release/allowit_sdk.wasm`. It imp
 
 ## Verification boundaries
 
-The [Lean demonstrator](verification/lean/README.md) supplies a pinned, checked model of compositional policy decisions and instruction-feature coverage. Its theorems do not establish Rust/Go implementation equivalence, complete natural-language intent coverage or classifier accuracy.
+The [Lean demonstrator](verification/lean/README.md) supplies a pinned, checked model of compositional policy decisions and instruction-feature coverage. Its theorems do not establish implementation equivalence, complete natural-language intent coverage or classifier accuracy.
 
 Tests cover exact limits, cap bypass attempts, arithmetic overflow, syntax rejection, forged IR, deterministic oracle/contract decisions, source spans, workflow retention, confidence failures, approval continuation keys, contract input failure, facade type-checking, LSP behavior and a seeded bounded mutation corpus. `contracts/` contains native rail adapters and their own build/test instructions. Compilation or a local contract test is not evidence that a program has been deployed or that funds moved on a public network.
 
@@ -243,11 +243,13 @@ typed API after authenticating the canonical run input. Execute effects only fro
 an in-process successful evaluation, never from a deserialized decision. Hosts
 must deduplicate by canonical run/input identity and verify all native authority
 and settlement bounds. `evaluate_ir` also requires the host to choose and enforce
-the supported execution profile. Deploy registry 1.3 readers before authoring
-any policy with this compiler; older readers reject registry 1.3 artifacts.
+the supported execution profile. Deploy registry 1.4 readers before authoring
+any policy with this compiler; older readers reject registry 1.4 artifacts.
 
 
 ## License
 
 AllowIt-authored source is MIT licensed. Third-party licenses and the companion materials required when redistributing SDK or contract binaries, including historical Actions artifacts, are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Keep the full [licenses/](licenses/) directory and root license with redistributed binaries.
 
+
+All newly compiled policies use registry 1.4.0, including legacy-shaped policies. Rebuild and redeploy compatible rail readers before using new artifacts. Historical 1.3.0 provider artifacts with a symbol asset must be recreated with a concrete mint and owner-approved installation; they fail closed under the current provider asset rule. Existing custody recovery follows its installed reader and owner withdrawal interface.

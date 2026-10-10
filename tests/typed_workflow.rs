@@ -891,3 +891,34 @@ fn final_authorization_rejects_missing_fees_even_without_source_fee_refusal() {
         assert_eq!(decision.outcome, "fail");
     }
 }
+
+#[test]
+fn oversized_provider_responses_are_rejected_before_hashing() {
+    let (p, mut c) = payment();
+    let environment = c.workflow.as_mut().unwrap();
+    if let Some(CurlOutcome::PaymentRequired(challenge)) = &mut environment.curl_outcome {
+        challenge.authenticated_wire_bytes = vec![0; 8193];
+    }
+    assert!(
+        request_digest(
+            &environment.binding,
+            &environment.execution_request,
+            &environment.curl_request,
+            &environment.curl_outcome
+        )
+        .is_err()
+    );
+    assert_eq!(
+        evaluate(&p, Profile::Oracle, &c).code,
+        "WORKFLOW_INPUT_LIMIT"
+    );
+    c.workflow.as_mut().unwrap().curl_outcome = Some(CurlOutcome::Complete(HttpResponse {
+        status: 200,
+        body: vec![0; 65537],
+        receipt_digest: [31; 32],
+    }));
+    assert_eq!(
+        evaluate(&p, Profile::Oracle, &c).code,
+        "WORKFLOW_INPUT_LIMIT"
+    );
+}

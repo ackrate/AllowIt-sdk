@@ -85,7 +85,7 @@ fn validate_chain_program(program: &Program) -> Result<(), Error> {
             Node::E(Expr::Call { name, .. })
                 if matches!(
                     name.as_str(),
-                    "cap_purchase_tiers" | "allowit::cap_purchase_tiers"
+                    "cap_purchase_tiers" | "allowit::cap_purchase_tiers" | "paysh::call"
                 ) =>
             {
                 return Err(Error::InvalidArtifact);

@@ -1083,7 +1083,11 @@ fn server_reconciliation_requires_no_file_journal_or_signing() {
     let observed =
         reconcile_record_with_expiry_bound(&f, record.clone(), &f.policy, owner, 1).unwrap();
     assert_eq!(observed.status, "uncertain");
-    f.rpc.data.lock().unwrap().height = 200;
+    {
+        let mut network = f.rpc.data.lock().unwrap();
+        network.height = 200;
+        network.block_height = 200;
+    }
     // Once both bounds pass, a still-valid processed blockhash prevents absence inference.
     f.rpc.data.lock().unwrap().processed_blockhash_valid = Some(true);
     let observed =

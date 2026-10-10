@@ -590,7 +590,6 @@ pub(crate) fn hex(digest: &Digest) -> String {
     }
     result
 }
-#[cfg(feature = "typed-workflow")]
 pub(crate) fn execution_shape(request: &ExecutionRequest) -> bool {
     request.effect_bounds.len() <= 16
         && request.fee_bounds.as_ref().is_none_or(|v| v.len() <= 16)
@@ -604,7 +603,13 @@ pub(crate) fn execution_shape(request: &ExecutionRequest) -> bool {
 }
 #[cfg(feature = "typed-workflow")]
 pub(crate) fn curl_shape(request: &CurlRequest) -> bool {
-    request.body_file.is_none()
+    request.body_file.is_none() && curl_input_size(request)
+}
+pub(crate) fn curl_input_size(request: &CurlRequest) -> bool {
+    request
+        .body_file
+        .as_ref()
+        .is_none_or(|value| value.len() <= 4096)
         && request.url.len() <= 4096
         && !request.url.is_empty()
         && request.headers.as_ref().is_none_or(|v| {
@@ -682,9 +687,15 @@ pub fn request_digest(
     request: &Option<CurlRequest>,
     outcome: &Option<CurlOutcome>,
 ) -> Result<Digest, WorkflowError> {
-    if outcome
+    if execution
         .as_ref()
-        .is_some_and(|value| !curl_outcome_shape(value))
+        .is_some_and(|value| !execution_shape(value))
+        || request
+            .as_ref()
+            .is_some_and(|value| !curl_input_size(value))
+        || outcome
+            .as_ref()
+            .is_some_and(|value| !curl_outcome_shape(value))
     {
         return Err(WorkflowError::new(
             "WORKFLOW_INPUT_LIMIT",
@@ -839,7 +850,6 @@ pub(crate) fn asset_from_identity(value: &str) -> Option<WorkflowAsset> {
     }
 }
 
-#[cfg(feature = "typed-workflow")]
 pub(crate) fn instruction_shape(instruction: &NativeInstruction) -> bool {
     let args = match instruction {
         NativeInstruction::SolanaNativeTransfer { lamports, .. } => return *lamports > 0,

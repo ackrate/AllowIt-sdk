@@ -1169,9 +1169,17 @@ fn run_inner(
             );
         }
         if environment
-            .curl_outcome
+            .execution_request
             .as_ref()
-            .is_some_and(|r| !crate::typed_workflow::curl_outcome_shape(r))
+            .is_some_and(|r| !crate::typed_workflow::execution_shape(r))
+            || environment
+                .curl_request
+                .as_ref()
+                .is_some_and(|r| !crate::typed_workflow::curl_input_size(r))
+            || environment
+                .curl_outcome
+                .as_ref()
+                .is_some_and(|r| !crate::typed_workflow::curl_outcome_shape(r))
         {
             return Decision::fail(
                 "WORKFLOW_INPUT_LIMIT",

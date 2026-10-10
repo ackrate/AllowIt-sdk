@@ -244,12 +244,12 @@ impl NativeOperations for NativeClient {
     }
 }
 /// Reconcile a durable signed operation without reading or writing a journal.
-/// Hosts must persist the exact validated record before any broadcast and commit
+/// Hosts must persist the exact validated record before any broadcast and
 /// merge this returned observation atomically into their own stored record.
 /// Preserve host-owned binding metadata separately; the observation is sanitized. This function never
 /// signs, broadcasts, replaces a proof, or trusts a status without receipt checks.
-/// Caller-supplied status and `extra` observations are discarded. They are not
-/// signed transaction fields and cannot establish settlement or nonexecution.
+/// Caller-supplied status and reserved chain observations are discarded. Host
+/// metadata is preserved but cannot establish settlement or nonexecution.
 /// Imported validity heights cannot establish expiry. Without a final network
 /// result, imported proofs stay uncertain even when a node lacks their blockhash.
 pub fn reconcile_record(
@@ -259,7 +259,7 @@ pub fn reconcile_record(
     owner: Key,
 ) -> Result<Record> {
     record.status = "uncertain".into();
-    record.extra.clear();
+    clear_imported_observations(&mut record);
     reconcile_saved_record(sdk, record, policy, owner, false)
 }
 
@@ -279,11 +279,29 @@ pub fn reconcile_record_with_expiry_bound(
     safe_height(&json!(expiry_bound))?;
     let original_height = record.last_valid_block_height;
     record.status = "uncertain".into();
-    record.extra.clear();
+    clear_imported_observations(&mut record);
     record.last_valid_block_height = expiry_bound;
     let mut observed = reconcile_saved_record(sdk, record, policy, owner, true)?;
     observed.last_valid_block_height = original_height;
     Ok(observed)
+}
+
+// Keep host bindings and application metadata when committing the observation.
+// These reserved fields are network conclusions, never caller authority.
+fn clear_imported_observations(record: &mut Record) {
+    for key in [
+        "absence",
+        "blockhashExpired",
+        "decisionCode",
+        "error",
+        "replayed",
+        "slot",
+        "confirmationStatus",
+        "err",
+        "confirmations",
+    ] {
+        record.extra.remove(key);
+    }
 }
 
 // Private journals may retain validity heights and durable absence observations.
@@ -427,7 +445,7 @@ impl<'a> PolicyLifecycle<'a> {
     pub fn new(sdk: &'a dyn NativeOperations, journal: &'a FileJournal) -> Self {
         Self { sdk, journal }
     }
-    /// Observe an imported record. This sanitizes extra metadata and cannot prove expiry.
+    /// Observe an imported record. This sanitizes chain observations and cannot prove expiry.
     /// For a host-owned journal, use `reconcile_journal` and keep its trusted bindings.
     pub fn reconcile(&self, record: Record, policy: &Policy, owner: Key) -> Result<Record> {
         reconcile_record(self.sdk, record, policy, owner)
@@ -435,17 +453,7 @@ impl<'a> PolicyLifecycle<'a> {
     /// Reconcile the exact record loaded from this private journal.
     /// No caller-supplied record or expiry bound is trusted.
     pub fn reconcile_journal(&self, id: &str, policy: &Policy, owner: Key) -> Result<Record> {
-        valid_id(id)?;
-        let name = format!("request-{id}");
-        self.journal.locked(|| {
-            let record = self
-                .journal
-                .read::<Record>(&name)?
-                .ok_or_else(|| Error::config("Missing journal record"))?;
-            let observed = self.reconcile_saved(record, policy, owner)?;
-            self.journal.write(&name, &observed)?;
-            Ok(observed)
-        })
+        self.recover(id, policy, owner)
     }
     fn reconcile_saved(&self, record: Record, policy: &Policy, owner: Key) -> Result<Record> {
         reconcile_saved_record(self.sdk, record, policy, owner, true)

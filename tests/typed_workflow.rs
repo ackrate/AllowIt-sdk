@@ -922,3 +922,39 @@ fn oversized_provider_responses_are_rejected_before_hashing() {
         "WORKFLOW_INPUT_LIMIT"
     );
 }
+
+#[test]
+fn oversized_agent_requests_are_rejected_before_hashing() {
+    let (p, mut c) = payment();
+    let env = c.workflow.as_mut().unwrap();
+    env.curl_request.as_mut().unwrap().url = "x".repeat(4097);
+    assert!(
+        request_digest(
+            &env.binding,
+            &env.execution_request,
+            &env.curl_request,
+            &env.curl_outcome
+        )
+        .is_err()
+    );
+    assert_eq!(
+        evaluate(&p, Profile::Oracle, &c).code,
+        "WORKFLOW_INPUT_LIMIT"
+    );
+    let (p, mut c) = execution();
+    let env = c.workflow.as_mut().unwrap();
+    env.execution_request.as_mut().unwrap().input = ExecutionInput::Message(vec![0; 65537]);
+    assert!(
+        request_digest(
+            &env.binding,
+            &env.execution_request,
+            &env.curl_request,
+            &env.curl_outcome
+        )
+        .is_err()
+    );
+    assert_eq!(
+        evaluate(&p, Profile::Oracle, &c).code,
+        "WORKFLOW_INPUT_LIMIT"
+    );
+}

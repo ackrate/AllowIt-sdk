@@ -21,6 +21,7 @@ dependencies = [
  "bs58",
  "curve25519-dalek",
  "ed25519-dalek",
+ "ethnum",
  "libc",
  "orca_whirlpools_core",
  "orca_whirlpools_macros",

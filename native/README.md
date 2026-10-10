@@ -35,15 +35,15 @@ directory and run its client with `node cli.mjs`. The separate Rust
 Rust transport. The repository's Rust compiler CLI is a developer tool.
 
 ```sh
-allowit policy generate 'Spend up to 5 test tokens per day with PaySH discovery'
+node cli.mjs policy generate 'Spend up to 5 test tokens per day with PaySH discovery'
 # Or retain the exact browser instance:
-# allowit policy import executor.json
-allowit policy deploy
-allowit policy fund 10
-allowit policy execute RECIPIENT_TOKEN_ACCOUNT 2
-allowit policy status
-allowit policy revoke
-allowit policy withdraw 8
+# node cli.mjs policy import executor.json
+node cli.mjs policy deploy
+node cli.mjs policy fund 10
+node cli.mjs policy execute RECIPIENT_TOKEN_ACCOUNT 2
+node cli.mjs policy status
+node cli.mjs policy revoke
+node cli.mjs policy withdraw 8
 ```
 
 Generate prints Rust and parameters and saves policy.json. Deploy prints the

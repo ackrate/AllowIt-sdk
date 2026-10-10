@@ -267,6 +267,7 @@ pub fn reconcile_record(
 /// witness. Never use a bound supplied by the browser, executor, or imported record.
 /// This clears imported status and absence metadata, then checks current finalized
 /// chain evidence and unchanged execution state before declaring nonexecution.
+/// The effective bound is the greater of the host bound and record height.
 /// It never signs or broadcasts. The returned record preserves the original height.
 pub fn reconcile_record_with_expiry_bound(
     sdk: &dyn NativeOperations,

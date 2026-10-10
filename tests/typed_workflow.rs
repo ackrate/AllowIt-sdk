@@ -927,6 +927,17 @@ fn oversized_provider_responses_are_rejected_before_hashing() {
 fn oversized_agent_requests_are_rejected_before_hashing() {
     let (p, mut c) = payment();
     let env = c.workflow.as_mut().unwrap();
+    env.curl_request.as_mut().unwrap().method = Some("x".repeat(17));
+    assert!(
+        request_digest(
+            &env.binding,
+            &env.execution_request,
+            &env.curl_request,
+            &env.curl_outcome
+        )
+        .is_err()
+    );
+    env.curl_request.as_mut().unwrap().method = None;
     env.curl_request.as_mut().unwrap().url = "x".repeat(4097);
     assert!(
         request_digest(

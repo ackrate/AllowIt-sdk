@@ -2035,7 +2035,7 @@ mod tests {
     #[test]
     fn bounded_quote_matches_independent_core_2_1_1_fixed_fee_vectors() {
         let (pool, arrays) = fixed_quote_fixture();
-        // Independently computed against the preserved 2.1.1 quote binary.
+        // Fixed values cross-checked with the independent constant-liquidity computation.
         // Both releases agree on input/output/minOut/fee within the range.
         for (amount, output, min_out, fee) in [
             (1, 0, 0, 1),

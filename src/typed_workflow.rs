@@ -607,9 +607,13 @@ pub(crate) fn curl_shape(request: &CurlRequest) -> bool {
 }
 pub(crate) fn curl_input_size(request: &CurlRequest) -> bool {
     request
-        .body_file
+        .method
         .as_ref()
-        .is_none_or(|value| value.len() <= 4096)
+        .is_none_or(|method| !method.is_empty() && method.len() <= 16)
+        && request
+            .body_file
+            .as_ref()
+            .is_none_or(|value| value.len() <= 4096)
         && request.url.len() <= 4096
         && !request.url.is_empty()
         && request.headers.as_ref().is_none_or(|v| {
@@ -699,7 +703,7 @@ pub fn request_digest(
     {
         return Err(WorkflowError::new(
             "WORKFLOW_INPUT_LIMIT",
-            "Typed HTTP response exceeds its bounded shape",
+            "Typed ingress exceeds its bounded shape",
         ));
     }
     let document = (

@@ -249,7 +249,7 @@ impl NativeOperations for NativeClient {
 /// Preserve host-owned binding metadata separately; the observation is sanitized. This function never
 /// signs, broadcasts, replaces a proof, or trusts a status without receipt checks.
 /// Caller-supplied status and reserved chain observations are discarded. Host
-/// metadata is preserved but cannot establish settlement or nonexecution.
+/// application metadata is preserved; SDK authorization bindings are discarded.
 /// Imported validity heights cannot establish expiry. Without a final network
 /// result, imported proofs stay uncertain even when a node lacks their blockhash.
 pub fn reconcile_record(
@@ -299,6 +299,11 @@ fn clear_imported_observations(record: &mut Record) {
         "confirmationStatus",
         "err",
         "confirmations",
+        "executionRequestDigest",
+        "approvalRequest",
+        "approval",
+        "simulation",
+        "supersededBy",
     ] {
         record.extra.remove(key);
     }

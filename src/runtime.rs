@@ -1183,7 +1183,7 @@ fn run_inner(
         {
             return Decision::fail(
                 "WORKFLOW_INPUT_LIMIT",
-                "Typed HTTP input exceeds its bounded shape.",
+                "Typed ingress exceeds its bounded shape.",
             );
         }
         if crate::typed_workflow::request_digest(

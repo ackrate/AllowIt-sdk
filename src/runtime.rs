@@ -971,8 +971,8 @@ fn validate_context(
 ) -> Result<(), alloc::boxed::Box<Decision>> {
     #[cfg(not(feature = "typed-workflow"))]
     let _ = provider_profile;
-    if let Some(asset) = native_payment_asset {
-        if provider_profile
+    if native_payment_asset.is_some_and(|asset| {
+        provider_profile
             || asset.network != ctx.network
             || asset.asset != ctx.token
             || asset.decimals != 6
@@ -988,12 +988,11 @@ fn validate_context(
                     | "solana:testnet"
             )
             || ctx.native_policy_storage.is_none()
-        {
-            return Err(failure(
-                "NATIVE_PAYMENT_BINDING",
-                "Native payment must match the host-verified six-decimal asset, network and storage.",
-            ));
-        }
+    }) {
+        return Err(failure(
+            "NATIVE_PAYMENT_BINDING",
+            "Native payment must match the host-verified six-decimal asset, network and storage.",
+        ));
     }
     #[cfg(feature = "typed-workflow")]
     if native_payment_asset.is_none() && provider_profile {

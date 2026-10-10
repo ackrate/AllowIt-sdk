@@ -522,3 +522,119 @@ fn service_allowlist_branches_compile_but_only_one_exact_effect_can_execute() {
         .collect::<String>();
     assert!(compile(&source(&(nine + "Ok(())"))).is_err());
 }
+
+#[cfg(all(feature = "compiler", feature = "std"))]
+mod native_payment {
+    use allowit_sdk::{
+        Context, NativePolicyStorage, Profile, ProviderPaymentAsset, compile, evaluate,
+        evaluate_with_trace_native_payment,
+    };
+
+    fn source() -> &'static str {
+        r#"use allowit::v1::prelude::*;
+struct PolicyParams { daily_limit: OwnerLimit, action_limit: OwnerLimit }
+fn new() -> PolicyParams { PolicyParams { daily_limit: allowit::owner_limit("native_daily_limit", 5_000_000), action_limit: allowit::owner_limit("native_action_limit", 1_000_000) } }
+async fn _execute(ctx: &Context, params: &PolicyParams) -> PolicyResult {
+    if ctx.token != "pathUSD" { return allowit::fail("Wrong asset"); }
+    if ctx.network != "tempo:localnet" { return allowit::fail("Wrong network"); }
+    if ctx.amount_units > allowit::stored_limit(ctx, params.action_limit)? { return allowit::fail("Action cap"); }
+    if ctx.spent_units + ctx.amount_units > allowit::stored_limit(ctx, params.daily_limit)? { return allowit::fail("Daily cap"); }
+    Ok(())
+}"#
+    }
+    fn context() -> Context {
+        let mut ctx: Context =
+            serde_json::from_str(include_str!("../examples/context.json")).unwrap();
+        ctx.network = "tempo:localnet".into();
+        ctx.token = "pathUSD".into();
+        ctx.action = "buy research".into();
+        ctx.spent_units = 0;
+        ctx.amount_units = 250_000;
+        ctx.allocation_units = 10_000_000;
+        ctx.native_policy_storage = Some(NativePolicyStorage {
+            daily_limit_units: 5_000_000,
+            action_limit_units: 1_000_000,
+        });
+        ctx
+    }
+    fn asset() -> ProviderPaymentAsset {
+        ProviderPaymentAsset {
+            network: "tempo:localnet".into(),
+            asset: "pathUSD".into(),
+            decimals: 6,
+        }
+    }
+    #[test]
+    fn explicit_native_host_uses_the_real_network_and_token_without_relaxing_defaults() {
+        let policy = compile(source()).unwrap();
+        let ctx = context();
+        assert_eq!(
+            evaluate(&policy, Profile::Oracle, &ctx).code,
+            "TOKEN_MISMATCH"
+        );
+        assert_eq!(evaluate(&policy, Profile::Contract, &ctx).outcome, "fail");
+        let (decision, trace) = evaluate_with_trace_native_payment(&policy, &ctx, &asset());
+        assert_eq!(decision.outcome, "pass");
+        assert!(trace.is_some());
+    }
+    #[test]
+    fn native_host_needs_exact_six_decimal_asset_and_verified_storage() {
+        let policy = compile(source()).unwrap();
+        let mut ctx = context();
+        let mut wrong = asset();
+        wrong.decimals = 18;
+        assert_eq!(
+            evaluate_with_trace_native_payment(&policy, &ctx, &wrong)
+                .0
+                .outcome,
+            "fail"
+        );
+        wrong = asset();
+        wrong.network = "tempo:testnet".into();
+        assert_eq!(
+            evaluate_with_trace_native_payment(&policy, &ctx, &wrong)
+                .0
+                .outcome,
+            "fail"
+        );
+        wrong = asset();
+        wrong.asset = "USDC".into();
+        assert_eq!(
+            evaluate_with_trace_native_payment(&policy, &ctx, &wrong)
+                .0
+                .outcome,
+            "fail"
+        );
+        ctx.native_policy_storage = None;
+        assert_eq!(
+            evaluate_with_trace_native_payment(&policy, &ctx, &asset())
+                .0
+                .code,
+            "NATIVE_PAYMENT_BINDING"
+        );
+    }
+    #[test]
+    fn public_json_cannot_claim_native_host_authority_and_caps_remain_deterministic() {
+        let policy = compile(source()).unwrap();
+        let mut ctx = context();
+        let response = allowit_sdk::process_value(
+            serde_json::json!({"operation":"evaluate","source":source(),"profile":"oracle","context":ctx}),
+        );
+        assert_eq!(response["ok"], false);
+        ctx.amount_units = 1_000_001;
+        assert_eq!(
+            evaluate_with_trace_native_payment(&policy, &ctx, &asset())
+                .0
+                .outcome,
+            "fail"
+        );
+        ctx.amount_units = 1_000_000;
+        ctx.spent_units = 4_000_001;
+        assert_eq!(
+            evaluate_with_trace_native_payment(&policy, &ctx, &asset())
+                .0
+                .outcome,
+            "fail"
+        );
+    }
+}

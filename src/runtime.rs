@@ -967,11 +967,35 @@ fn validate_context(
     ctx: &Context,
     provider_profile: bool,
     private_provider_localnet: bool,
+    native_payment_asset: Option<&crate::ProviderPaymentAsset>,
 ) -> Result<(), alloc::boxed::Box<Decision>> {
     #[cfg(not(feature = "typed-workflow"))]
     let _ = provider_profile;
+    if native_payment_asset.is_some_and(|asset| {
+        provider_profile
+            || asset.network != ctx.network
+            || asset.asset != ctx.token
+            || asset.decimals != 6
+            || asset.asset.is_empty()
+            || asset.asset.len() > 32
+            || !asset.asset.bytes().all(|b| b.is_ascii_alphanumeric())
+            || !matches!(
+                asset.network.as_str(),
+                "tempo:localnet"
+                    | "tempo:testnet"
+                    | "solana:localnet"
+                    | "solana:devnet"
+                    | "solana:testnet"
+            )
+            || ctx.native_policy_storage.is_none()
+    }) {
+        return Err(failure(
+            "NATIVE_PAYMENT_BINDING",
+            "Native payment must match the host-verified six-decimal asset, network and storage.",
+        ));
+    }
     #[cfg(feature = "typed-workflow")]
-    if provider_profile {
+    if native_payment_asset.is_none() && provider_profile {
         let binding = ctx.provider_call_input.as_ref().ok_or_else(|| {
             failure(
                 "PROVIDER_INPUT_REQUIRED",
@@ -990,20 +1014,21 @@ fn validate_context(
                 "Context must match the authenticated six-decimal native payment asset.",
             ));
         }
-    } else if ctx.token != "USDC" {
+    } else if native_payment_asset.is_none() && ctx.token != "USDC" {
         return Err(failure(
             "TOKEN_MISMATCH",
             "This policy supports six-decimal USDC.",
         ));
     }
     #[cfg(not(feature = "typed-workflow"))]
-    if ctx.token != "USDC" {
+    if native_payment_asset.is_none() && ctx.token != "USDC" {
         return Err(failure(
             "TOKEN_MISMATCH",
             "This policy supports six-decimal USDC.",
         ));
     }
-    if !(private_provider_localnet && provider_profile && ctx.network == "solana:localnet")
+    if native_payment_asset.is_none()
+        && !(private_provider_localnet && provider_profile && ctx.network == "solana:localnet")
         && ![
             "mainnet",
             "mainnet-beta",
@@ -1127,6 +1152,7 @@ fn run(ir: &Program, profile: Profile, ctx: &Context, binding: String) -> Decisi
         ctx,
         binding,
         false,
+        None,
         #[cfg(feature = "compiler")]
         None,
     )
@@ -1138,6 +1164,7 @@ fn run_inner(
     ctx: &Context,
     binding: String,
     private_provider_localnet: bool,
+    native_payment_asset: Option<&crate::ProviderPaymentAsset>,
     #[cfg(feature = "compiler")] trace: Option<&mut crate::trace::TraceRecorder>,
 ) -> Decision {
     if let Err(error) = validate_program(ir) {
@@ -1237,6 +1264,7 @@ fn run_inner(
             ctx,
             cfg!(feature = "typed-workflow") && crate::validation::provider_call_required(ir),
             private_provider_localnet,
+            native_payment_asset,
         )
     } {
         return *error;
@@ -1408,7 +1436,7 @@ pub fn evaluate_with_trace(
     policy: &CompiledPolicy,
     ctx: &Context,
 ) -> (Decision, Option<crate::WorkflowTrace>) {
-    evaluate_with_trace_inner(policy, ctx, false)
+    evaluate_with_trace_inner(policy, ctx, false, None)
 }
 
 /// Explicit developer-host capability for authenticated provider input on a
@@ -1430,7 +1458,7 @@ pub fn evaluate_with_trace_private_provider_localnet(
             None,
         );
     }
-    evaluate_with_trace_inner(policy, ctx, true)
+    evaluate_with_trace_inner(policy, ctx, true, None)
 }
 
 #[cfg(feature = "compiler")]
@@ -1438,6 +1466,7 @@ fn evaluate_with_trace_inner(
     policy: &CompiledPolicy,
     ctx: &Context,
     private_provider_localnet: bool,
+    native_payment_asset: Option<&crate::ProviderPaymentAsset>,
 ) -> (Decision, Option<crate::WorkflowTrace>) {
     let compiled = match validate_artifact(policy) {
         Ok(compiled) => compiled,
@@ -1450,6 +1479,7 @@ fn evaluate_with_trace_inner(
         ctx,
         policy.source_hash.clone(),
         private_provider_localnet,
+        native_payment_asset,
         Some(&mut trace),
     );
     let trace = trace.finish(&decision);
@@ -1693,4 +1723,28 @@ fn typed_budget_plans(
         });
     }
     Ok(plans)
+}
+/// Host-only native custody evaluation. The adapter must authenticate the real
+/// chain, exact six-decimal token and current custody storage before calling.
+/// This function never aliases chain/asset identifiers and is not exposed by
+/// the public JSON protocol or the Contract evaluator.
+#[cfg(all(feature = "compiler", feature = "std"))]
+pub fn evaluate_with_trace_native_payment(
+    policy: &CompiledPolicy,
+    ctx: &Context,
+    asset: &crate::ProviderPaymentAsset,
+) -> (Decision, Option<crate::WorkflowTrace>) {
+    if ctx.native_policy_storage.is_none()
+        || crate::validation::provider_call_required(&policy.ir)
+        || crate::typed_workflow::required(&policy.ir)
+    {
+        return (
+            Decision::fail(
+                "NATIVE_PAYMENT_BINDING",
+                "Use the native custody host with authenticated storage and a compatible policy.",
+            ),
+            None,
+        );
+    }
+    evaluate_with_trace_inner(policy, ctx, false, Some(asset))
 }

@@ -1,5 +1,6 @@
 /target/
 /native-rust/target/
+/tempo-rust/target/
 /crates/paysh-interface/target/
 *.log
 .DS_Store

@@ -248,7 +248,8 @@ impl NativeOperations for NativeClient {
 /// this returned observation atomically in their own storage. This function never
 /// signs, broadcasts, replaces a proof, or trusts a status without receipt checks.
 /// Caller-supplied status and reserved chain observations are discarded. Host
-/// metadata is preserved but cannot establish settlement or nonexecution.
+/// application metadata is preserved, while authority bindings are discarded.
+/// Use `PolicyLifecycle::reconcile_journal` to retain private journal bindings.
 /// Imported validity heights cannot establish expiry. Without a final network
 /// result, imported proofs stay uncertain even when a node lacks their blockhash.
 pub fn reconcile_record(
@@ -286,8 +287,8 @@ pub fn reconcile_record_with_expiry_bound(
     Ok(observed)
 }
 
-// Keep host bindings and application metadata when committing the observation.
-// These reserved fields are network conclusions, never caller authority.
+// Preserve application metadata, not caller-supplied authority bindings.
+// Only the private journal path can retain trusted execution metadata.
 fn clear_imported_observations(record: &mut Record) {
     for key in [
         "absence",
@@ -299,6 +300,11 @@ fn clear_imported_observations(record: &mut Record) {
         "confirmationStatus",
         "err",
         "confirmations",
+        "executionRequestDigest",
+        "approvalRequest",
+        "approval",
+        "simulation",
+        "supersededBy",
     ] {
         record.extra.remove(key);
     }

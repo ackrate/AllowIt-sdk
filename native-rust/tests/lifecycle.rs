@@ -996,8 +996,25 @@ fn server_reconciliation_requires_no_file_journal_or_signing() {
     with_metadata
         .extra
         .insert("hostMetadata".into(), json!({"customer":"fixture"}));
+    for key in ["approval", "simulation", "supersededBy"] {
+        with_metadata
+            .extra
+            .insert(key.into(), json!({"untrusted":"caller"}));
+    }
     let observed = reconcile_record(&f, with_metadata.clone(), &f.policy, owner).unwrap();
-    assert_eq!(observed.extra, with_metadata.extra);
+    assert_eq!(
+        observed.extra["hostMetadata"],
+        with_metadata.extra["hostMetadata"]
+    );
+    for key in [
+        "executionRequestDigest",
+        "approvalRequest",
+        "approval",
+        "simulation",
+        "supersededBy",
+    ] {
+        assert!(!observed.extra.contains_key(key));
+    }
     assert_eq!(observed.status, "uncertain");
     assert_eq!(observed.signature, record.signature);
     assert_eq!(observed.signed_bytes, record.signed_bytes);

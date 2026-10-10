@@ -73,12 +73,21 @@ impl Rpc for FakeRpc {
                     json!(99)
                 }
             }
-            "getBlockTime" => {
-                if Some(params[0].as_u64().unwrap()) == d.processed_slot {
-                    json!(d.processed_time.unwrap_or(d.chain_time))
-                } else {
-                    json!(d.chain_time)
-                }
+            "getBlockTime" => return Err(Error::config("Processed block is not confirmed")),
+            "getAccountInfo" => {
+                assert_eq!(params[0], "SysvarC1ock11111111111111111111111111111111");
+                assert_eq!(params[1]["commitment"], "processed");
+                let slot = d.processed_slot.unwrap_or(99);
+                assert_eq!(params[1]["minContextSlot"], slot);
+                let mut clock = [0u8; 40];
+                clock[..8].copy_from_slice(&slot.to_le_bytes());
+                clock[32..40].copy_from_slice(
+                    &(d.processed_time.unwrap_or(d.chain_time) as i64).to_le_bytes(),
+                );
+                json!({"context":{"slot":slot},"value":{
+                    "owner":"Sysvar1111111111111111111111111111111111111",
+                    "executable":false,"data":[base64::engine::general_purpose::STANDARD.encode(clock),"base64"]
+                }})
             }
             "getBlock" => {
                 assert_eq!(params[1]["transactionDetails"], "none");
@@ -976,7 +985,19 @@ fn server_reconciliation_requires_no_file_journal_or_signing() {
         extra: Default::default(),
     };
     assert!(!f.directory.exists());
-    let observed = reconcile_record(&f, record.clone(), &f.policy, owner).unwrap();
+    let mut with_metadata = record.clone();
+    with_metadata
+        .extra
+        .insert("executionRequestDigest".into(), json!("host-owned-binding"));
+    with_metadata.extra.insert(
+        "approvalRequest".into(),
+        json!({"operationId":"server-proof-0001"}),
+    );
+    with_metadata
+        .extra
+        .insert("hostMetadata".into(), json!({"customer":"fixture"}));
+    let observed = reconcile_record(&f, with_metadata.clone(), &f.policy, owner).unwrap();
+    assert_eq!(observed.extra, with_metadata.extra);
     assert_eq!(observed.status, "uncertain");
     assert_eq!(observed.signature, record.signature);
     assert_eq!(observed.signed_bytes, record.signed_bytes);
@@ -1074,6 +1095,33 @@ fn server_reconciliation_requires_no_file_journal_or_signing() {
     assert_eq!(observed.extra["decisionCode"], "EXPIRED_UNEXECUTED");
     assert_eq!(observed.signed_bytes, record.signed_bytes);
     assert!(f.rpc.data.lock().unwrap().sends.is_empty());
+    // Public lifecycle callers recover their own durable journal bounds and
+    // host binding metadata; caller-supplied unsigned fields are not trusted.
+    let mut saved = with_metadata.clone();
+    saved.last_valid_block_height = 1;
+    f.journal
+        .locked(|| f.journal.write(&format!("request-{}", saved.id), &saved))
+        .unwrap();
+    let recovered = f
+        .life()
+        .reconcile_journal(&saved.id, &f.policy, owner)
+        .unwrap();
+    assert_eq!(recovered.status, "failed");
+    assert_eq!(
+        recovered.extra["executionRequestDigest"],
+        "host-owned-binding"
+    );
+    assert_eq!(recovered.extra["decisionCode"], "EXPIRED_UNEXECUTED");
+    assert!(
+        f.life()
+            .reconcile_journal("../foreign", &f.policy, owner)
+            .is_err()
+    );
+    assert!(
+        f.life()
+            .reconcile_journal("missing-record", &f.policy, owner)
+            .is_err()
+    );
     let mut substituted = record;
     substituted.intent = substituted.intent.replace("\"1\"", "\"2\"");
     assert!(reconcile_record(&f, substituted, &f.policy, owner).is_err());

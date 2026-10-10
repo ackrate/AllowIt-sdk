@@ -1987,23 +1987,33 @@ mod tests {
     }
 
     #[test]
-    fn bounded_quote_matches_independent_core_2_1_1_fixed_fee_vectors() {
+    fn bounded_quote_matches_independent_constant_liquidity_math() {
+        use ethnum::U256;
         let (pool, arrays) = fixed_quote_fixture();
-        // Independently computed against the preserved 2.1.1 quote binary.
-        // Both releases agree on input/output/minOut/fee within the range.
-        for (amount, output, min_out, fee) in [
-            (1, 0, 0, 1),
-            (99, 0, 0, 1),
-            (1000, 9, 8, 1),
-            (10_000, 99, 98, 4),
-            (100_000, 999, 994, 40),
-            (1_000_000, 9986, 9936, 400),
-            (2_000_000, 19952, 19852, 800),
-            (10_000_000, 98970, 98475, 4000),
-            (50_000_000, 476009, 473628, 20_000),
-            (100_000_000, 908760, 904216, 40_000),
-            (250_000_000, 1999359, 1989362, 100_000),
+        // This range stays within one liquidity interval. Compute the Q64.64
+        // constant-liquidity invariant directly, without another quote engine.
+        for amount in [
+            1u64,
+            99,
+            1000,
+            10_000,
+            100_000,
+            1_000_000,
+            2_000_000,
+            10_000_000,
+            50_000_000,
+            100_000_000,
+            250_000_000,
         ] {
+            let scale: U256 = U256::ONE << 64u32;
+            let liquidity = U256::from(pool.liquidity);
+            let price = U256::from(pool.sqrt_price);
+            let fee = (amount as u128 * pool.fee_rate as u128).div_ceil(1_000_000) as u64;
+            let numerator = liquidity * price * scale;
+            let denominator = liquidity * scale + U256::from(amount - fee) * price;
+            let next = (numerator + denominator - U256::ONE) / denominator;
+            let output = ((liquidity * (price - next)) / scale).as_u64();
+            let min_out = ((output as u128 * 9950) / 10_000) as u64;
             let q = bounded_whirlpool_quote(amount, 50, pool, arrays).unwrap();
             assert_eq!(
                 (q.token_in, q.token_est_out, q.token_min_out, q.trade_fee),

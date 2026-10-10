@@ -247,8 +247,8 @@ impl NativeOperations for NativeClient {
 /// Hosts must persist the exact validated record before any broadcast and commit
 /// this returned observation atomically in their own storage. This function never
 /// signs, broadcasts, replaces a proof, or trusts a status without receipt checks.
-/// Caller-supplied status and `extra` observations are discarded. They are not
-/// signed transaction fields and cannot establish settlement or nonexecution.
+/// Caller-supplied status and reserved chain observations are discarded. Host
+/// metadata is preserved but cannot establish settlement or nonexecution.
 /// Imported validity heights cannot establish expiry. Without a final network
 /// result, imported proofs stay uncertain even when a node lacks their blockhash.
 pub fn reconcile_record(
@@ -258,7 +258,7 @@ pub fn reconcile_record(
     owner: Key,
 ) -> Result<Record> {
     record.status = "uncertain".into();
-    record.extra.clear();
+    clear_imported_observations(&mut record);
     reconcile_saved_record(sdk, record, policy, owner, false)
 }
 
@@ -278,11 +278,29 @@ pub fn reconcile_record_with_expiry_bound(
     safe_height(&json!(expiry_bound))?;
     let original_height = record.last_valid_block_height;
     record.status = "uncertain".into();
-    record.extra.clear();
+    clear_imported_observations(&mut record);
     record.last_valid_block_height = expiry_bound;
     let mut observed = reconcile_saved_record(sdk, record, policy, owner, true)?;
     observed.last_valid_block_height = original_height;
     Ok(observed)
+}
+
+// Keep host bindings and application metadata when committing the observation.
+// These reserved fields are network conclusions, never caller authority.
+fn clear_imported_observations(record: &mut Record) {
+    for key in [
+        "absence",
+        "blockhashExpired",
+        "decisionCode",
+        "error",
+        "replayed",
+        "slot",
+        "confirmationStatus",
+        "err",
+        "confirmations",
+    ] {
+        record.extra.remove(key);
+    }
 }
 
 // Private journals may retain validity heights and durable absence observations.
@@ -426,8 +444,25 @@ impl<'a> PolicyLifecycle<'a> {
     pub fn new(sdk: &'a dyn NativeOperations, journal: &'a FileJournal) -> Self {
         Self { sdk, journal }
     }
+    /// Observe an imported record. This discards reserved chain observations and cannot prove expiry.
+    /// For a host-owned journal, use `reconcile_journal` and keep its trusted bindings.
     pub fn reconcile(&self, record: Record, policy: &Policy, owner: Key) -> Result<Record> {
         reconcile_record(self.sdk, record, policy, owner)
+    }
+    /// Reconcile the exact record loaded from this private journal.
+    /// No caller-supplied record or expiry bound is trusted.
+    pub fn reconcile_journal(&self, id: &str, policy: &Policy, owner: Key) -> Result<Record> {
+        valid_id(id)?;
+        let name = format!("request-{id}");
+        self.journal.locked(|| {
+            let record = self
+                .journal
+                .read::<Record>(&name)?
+                .ok_or_else(|| Error::config("Missing journal record"))?;
+            let observed = self.reconcile_saved(record, policy, owner)?;
+            self.journal.write(&name, &observed)?;
+            Ok(observed)
+        })
     }
     fn reconcile_saved(&self, record: Record, policy: &Policy, owner: Key) -> Result<Record> {
         reconcile_saved_record(self.sdk, record, policy, owner, true)
@@ -661,7 +696,26 @@ impl<'a> PolicyLifecycle<'a> {
             }
             let height = safe_height(&self.sdk.client().rpc.call("getBlockHeight",
                 json!([{"commitment":"processed", "minContextSlot":slot}]))?)?;
-            let now = safe_height(&self.sdk.client().rpc.call("getBlockTime", json!([slot]))?)?;
+            let clock = self.sdk.client().rpc.call("getAccountInfo", json!([
+                "SysvarC1ock11111111111111111111111111111111",
+                {"commitment":"processed", "minContextSlot":slot, "encoding":"base64"}
+            ]))?;
+            if safe_height(&clock["context"]["slot"])? < slot
+                || clock["value"]["owner"] != "Sysvar1111111111111111111111111111111111111"
+                || clock["value"]["executable"] != false
+                || clock["value"]["data"][1] != "base64"
+            {
+                return Err(Error::config("Invalid live Clock observation"));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD.decode(
+                clock["value"]["data"][0].as_str()
+                    .ok_or_else(|| Error::config("Missing live Clock data"))?
+            ).map_err(|_| Error::config("Invalid live Clock data"))?;
+            if bytes.len() != 40 || u64::from_le_bytes(bytes[..8].try_into().unwrap()) < slot {
+                return Err(Error::config("Invalid live Clock slot"));
+            }
+            let now = u64::try_from(i64::from_le_bytes(bytes[32..40].try_into().unwrap()))
+                .map_err(|_| Error::config("Invalid live Clock timestamp"))?;
             if authorized.last_valid_block_height.checked_sub(height).is_none_or(|remaining| remaining < 32)
                 || authorized.approval.expires_at.checked_sub(now).is_none_or(|remaining| remaining < 30)
             {

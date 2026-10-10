@@ -279,7 +279,7 @@ pub fn reconcile_record_with_expiry_bound(
     let original_height = record.last_valid_block_height;
     record.status = "uncertain".into();
     clear_imported_observations(&mut record);
-    record.last_valid_block_height = expiry_bound;
+    record.last_valid_block_height = expiry_bound.max(original_height);
     let mut observed = reconcile_saved_record(sdk, record, policy, owner, true)?;
     observed.last_valid_block_height = original_height;
     Ok(observed)
@@ -452,6 +452,7 @@ impl<'a> PolicyLifecycle<'a> {
     /// Reconcile the exact record loaded from this private journal.
     /// No caller-supplied record or expiry bound is trusted.
     pub fn reconcile_journal(&self, id: &str, policy: &Policy, owner: Key) -> Result<Record> {
+        policy.validate()?;
         valid_id(id)?;
         let name = format!("request-{id}");
         self.journal.locked(|| {
@@ -459,6 +460,9 @@ impl<'a> PolicyLifecycle<'a> {
                 .journal
                 .read::<Record>(&name)?
                 .ok_or_else(|| Error::config("Missing journal record"))?;
+            if record.id != id {
+                return Err(Error::config("Journal request id differs from its record"));
+            }
             let observed = self.reconcile_saved(record, policy, owner)?;
             self.journal.write(&name, &observed)?;
             Ok(observed)

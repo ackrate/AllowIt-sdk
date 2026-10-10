@@ -5,6 +5,109 @@ use allowit_sdk::{
 use serde_json::json;
 
 const CALL: &str = "paysh::call(\"air-quality\", \"request\", 1000, 5000000, 100000)";
+
+#[test]
+fn private_provider_localnet_requires_an_explicit_host_capability() {
+    let policy = compile(&source(&format!(
+        "if !{CALL} {{ return fail(\"Unavailable\"); }} Ok(())"
+    )))
+    .unwrap();
+    let mut ctx = context();
+    ctx.network = "solana:localnet".into();
+    ctx.provider_call_input
+        .as_mut()
+        .unwrap()
+        .payment_asset
+        .network = ctx.network.clone();
+    for decision in [
+        evaluate(&policy, Profile::Oracle, &ctx),
+        allowit_sdk::evaluate_ir(&policy.ir, Profile::Oracle, &ctx),
+        allowit_sdk::evaluate_with_trace(&policy, &ctx).0,
+    ] {
+        assert_eq!(decision.code, "INVALID_NETWORK");
+        assert!(decision.system_operations.is_empty());
+    }
+    assert_eq!(
+        evaluate(&policy, Profile::Contract, &ctx).code,
+        "PROVIDER_PROFILE_UNSUPPORTED"
+    );
+    let wire = process_value(
+        json!({"operation":"evaluate","profile":"oracle","source":policy.source,"context":ctx}),
+    );
+    assert!(wire.get("error").is_some());
+}
+
+#[test]
+fn private_provider_localnet_preserves_exact_input_domain_artifact_and_caps() {
+    let policy = compile(&source(&format!(
+        "if !{CALL} {{ return fail(\"Unavailable\"); }} Ok(())"
+    )))
+    .unwrap();
+    let mut ctx = context();
+    ctx.network = "solana:localnet".into();
+    ctx.provider_call_input
+        .as_mut()
+        .unwrap()
+        .payment_asset
+        .network = ctx.network.clone();
+    let (decision, trace) =
+        allowit_sdk::evaluate_with_trace_private_provider_localnet(&policy, &ctx);
+    assert_eq!(decision.outcome, "pass");
+    assert!(trace.unwrap().complete);
+    assert_eq!(decision.system_operations.len(), 1);
+    assert_eq!(
+        decision.system_operations[0].payment_asset.network,
+        "solana:localnet"
+    );
+    assert_eq!(decision.system_operations[0].request_digest, "a".repeat(64));
+    for mismatch in [
+        "network",
+        "asset_domain",
+        "missing",
+        "service",
+        "input",
+        "digest",
+        "caps",
+    ] {
+        let mut bad = ctx.clone();
+        match mismatch {
+            "network" => bad.network = "solana:testnet".into(),
+            "asset_domain" => {
+                bad.provider_call_input
+                    .as_mut()
+                    .unwrap()
+                    .payment_asset
+                    .network = "solana:testnet".into()
+            }
+            "missing" => bad.provider_call_input = None,
+            "service" => bad.provider_call_input.as_mut().unwrap().service_id = "other".into(),
+            "input" => bad.provider_call_input.as_mut().unwrap().input_key = "other".into(),
+            "digest" => bad.provider_call_input.as_mut().unwrap().request_digest = "invalid".into(),
+            _ => bad.spent_units = bad.allocation_units,
+        }
+        let (decision, _) =
+            allowit_sdk::evaluate_with_trace_private_provider_localnet(&policy, &bad);
+        assert_eq!(decision.outcome, "fail", "{mismatch}");
+        assert!(decision.system_operations.is_empty(), "{mismatch}");
+    }
+    let mut forged = policy.clone();
+    forged.source.push(' ');
+    assert_eq!(
+        allowit_sdk::evaluate_with_trace_private_provider_localnet(&forged, &ctx)
+            .0
+            .code,
+        "INVALID_ARTIFACT"
+    );
+    let ordinary =
+        compile(&source("Ok(())").replace("HNCXuc5dkQrUimi76UaezxrF3hfEhWDr9BXvWXGyi2qv", "USDC"))
+            .unwrap();
+    assert_eq!(
+        allowit_sdk::evaluate_with_trace_private_provider_localnet(&ordinary, &ctx)
+            .0
+            .code,
+        "INVALID_NETWORK"
+    );
+}
 fn source(body: &str) -> String {
     format!(
         "use allowit::prelude::*; pub async fn execute(ctx: &Context) -> PolicyResult {{ set_cap(ctx, \"100\", \"HNCXuc5dkQrUimi76UaezxrF3hfEhWDr9BXvWXGyi2qv\")?; {body} }}"

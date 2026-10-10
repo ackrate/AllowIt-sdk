@@ -966,6 +966,7 @@ fn invalid() -> alloc::boxed::Box<Decision> {
 fn validate_context(
     ctx: &Context,
     provider_profile: bool,
+    private_provider_localnet: bool,
 ) -> Result<(), alloc::boxed::Box<Decision>> {
     #[cfg(not(feature = "typed-workflow"))]
     let _ = provider_profile;
@@ -1002,21 +1003,22 @@ fn validate_context(
             "This policy supports six-decimal USDC.",
         ));
     }
-    if ![
-        "mainnet",
-        "mainnet-beta",
-        "devnet",
-        "testnet",
-        "stellar-mainnet",
-        "stellar-testnet",
-        "solana:mainnet",
-        "solana:devnet",
-        "solana:testnet",
-        "stellar:mainnet",
-        "stellar:testnet",
-        "local:dev",
-    ]
-    .contains(&ctx.network.as_str())
+    if !(private_provider_localnet && provider_profile && ctx.network == "solana:localnet")
+        && ![
+            "mainnet",
+            "mainnet-beta",
+            "devnet",
+            "testnet",
+            "stellar-mainnet",
+            "stellar-testnet",
+            "solana:mainnet",
+            "solana:devnet",
+            "solana:testnet",
+            "stellar:mainnet",
+            "stellar:testnet",
+            "local:dev",
+        ]
+        .contains(&ctx.network.as_str())
     {
         return Err(failure(
             "INVALID_NETWORK",
@@ -1124,6 +1126,7 @@ fn run(ir: &Program, profile: Profile, ctx: &Context, binding: String) -> Decisi
         profile,
         ctx,
         binding,
+        false,
         #[cfg(feature = "compiler")]
         None,
     )
@@ -1134,6 +1137,7 @@ fn run_inner(
     profile: Profile,
     ctx: &Context,
     binding: String,
+    private_provider_localnet: bool,
     #[cfg(feature = "compiler")] trace: Option<&mut crate::trace::TraceRecorder>,
 ) -> Decision {
     if let Err(error) = validate_program(ir) {
@@ -1232,6 +1236,7 @@ fn run_inner(
         validate_context(
             ctx,
             cfg!(feature = "typed-workflow") && crate::validation::provider_call_required(ir),
+            private_provider_localnet,
         )
     } {
         return *error;
@@ -1403,6 +1408,37 @@ pub fn evaluate_with_trace(
     policy: &CompiledPolicy,
     ctx: &Context,
 ) -> (Decision, Option<crate::WorkflowTrace>) {
+    evaluate_with_trace_inner(policy, ctx, false)
+}
+
+/// Explicit developer-host capability for authenticated provider input on a
+/// private Solana validator. The host must verify its real genesis, deployment,
+/// owner/source binding and loopback configuration before calling this method.
+/// This capability neither aliases a public network nor changes the default
+/// evaluator, wire protocol or Contract profile.
+#[cfg(all(feature = "compiler", feature = "typed-workflow", feature = "std"))]
+pub fn evaluate_with_trace_private_provider_localnet(
+    policy: &CompiledPolicy,
+    ctx: &Context,
+) -> (Decision, Option<crate::WorkflowTrace>) {
+    if ctx.network != "solana:localnet" || !crate::validation::provider_call_required(&policy.ir) {
+        return (
+            Decision::fail(
+                "INVALID_NETWORK",
+                "This capability requires a private Solana provider operation.",
+            ),
+            None,
+        );
+    }
+    evaluate_with_trace_inner(policy, ctx, true)
+}
+
+#[cfg(feature = "compiler")]
+fn evaluate_with_trace_inner(
+    policy: &CompiledPolicy,
+    ctx: &Context,
+    private_provider_localnet: bool,
+) -> (Decision, Option<crate::WorkflowTrace>) {
     let compiled = match validate_artifact(policy) {
         Ok(compiled) => compiled,
         Err(decision) => return (*decision, None),
@@ -1413,6 +1449,7 @@ pub fn evaluate_with_trace(
         Profile::Oracle,
         ctx,
         policy.source_hash.clone(),
+        private_provider_localnet,
         Some(&mut trace),
     );
     let trace = trace.finish(&decision);

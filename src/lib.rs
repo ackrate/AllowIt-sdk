@@ -78,6 +78,8 @@ pub use runtime::evaluate;
 pub use runtime::evaluate_ir;
 #[cfg(feature = "compiler")]
 pub use runtime::evaluate_with_trace;
+#[cfg(all(feature = "compiler", feature = "typed-workflow", feature = "std"))]
+pub use runtime::evaluate_with_trace_private_provider_localnet;
 pub use types::*;
 pub use validation::validate_program;
 

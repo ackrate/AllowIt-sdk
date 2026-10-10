@@ -16,7 +16,7 @@ fn diagnostics_hover_completion_and_workflow_share_the_compiler() {
             .contains("Total spending limit")
     );
     let completion = server.handle(json!({"id":3,"method":"textDocument/completion","params":{}}));
-    assert_eq!(completion[0]["result"].as_array().unwrap().len(), 43);
+    assert_eq!(completion[0]["result"].as_array().unwrap().len(), 48);
     let workflow=server.handle(json!({"id":4,"method":"allowit/workflow","params":{"textDocument":{"uri":"file:///policy.rs"}}}));
     assert_eq!(
         workflow[0]["result"]["policy"]["workflow"][0]["name"],

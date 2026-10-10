@@ -3,12 +3,17 @@ use serde::{Deserialize, Serialize};
 
 pub const LANGUAGE: &str = "allowit-rust-v1";
 /// Source registry version. Explicit namespaces are available from 1.1.0.
-pub const REGISTRY_VERSION: &str = "1.2.0";
-/// Canonical operation schema. Source-only aliases do not change this version.
+pub const REGISTRY_VERSION: &str = "1.4.0";
+/// Canonical expression schema. New registered host operations use the source registry
+/// version and explicit target-profile admission without changing the expression encoding.
 pub const IR_VERSION: &str = "1.0.0";
-/// Both registries use the same canonical operations and artifact semantics.
+pub const TYPED_IR_VERSION: &str = "1.1.0";
+/// Previously supported guard registries retain their artifact semantics.
 pub fn supported_registry_version(version: &str) -> bool {
-    matches!(version, "1.0.0" | "1.1.0" | REGISTRY_VERSION)
+    matches!(
+        version,
+        "1.0.0" | "1.1.0" | "1.2.0" | "1.3.0" | REGISTRY_VERSION
+    )
 }
 pub const MAX_SOURCE_BYTES: usize = 32768;
 pub const MAX_NODES: usize = 2048;
@@ -86,6 +91,10 @@ pub enum Expr {
         args: Vec<Expr>,
         span: SourceSpan,
     },
+    #[cfg(feature = "typed-workflow")]
+    Borrow {
+        value: alloc::boxed::Box<Expr>,
+    },
     Try {
         value: alloc::boxed::Box<Expr>,
     },
@@ -112,6 +121,21 @@ pub enum Statement {
         value: Expr,
         span: SourceSpan,
     },
+    #[cfg(feature = "typed-workflow")]
+    IfSome {
+        name: String,
+        value: Expr,
+        then_branch: Vec<Statement>,
+        else_branch: Vec<Statement>,
+        span: SourceSpan,
+    },
+    #[cfg(feature = "typed-workflow")]
+    ForEach {
+        name: String,
+        values: Expr,
+        body: Vec<Statement>,
+        span: SourceSpan,
+    },
     If {
         condition: Expr,
         then_branch: Vec<Statement>,
@@ -126,6 +150,8 @@ impl Statement {
             | Self::Expression { span, .. }
             | Self::Return { span, .. }
             | Self::If { span, .. } => *span,
+            #[cfg(feature = "typed-workflow")]
+            Self::IfSome { span, .. } | Self::ForEach { span, .. } => *span,
         }
     }
 }
@@ -178,6 +204,12 @@ pub struct CompiledPolicy {
     pub ir_hash: String,
     pub registry_version: String,
     pub execution_requirements: ExecutionRequirements,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_call_requirements: Vec<ProviderCallRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub typed_workflow_requirements: Vec<crate::typed_workflow::TypedWorkflowNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub typed_budget_requirements: Vec<crate::typed_workflow::TypedBudgetRequirement>,
     pub limit: String,
     pub token: String,
     pub source: String,
@@ -207,6 +239,10 @@ pub enum ExecutionFeature {
     PurchaseHistory,
     RuntimeContextU64,
     SemanticEvidence,
+    ProviderCall,
+    PaidHttpCall,
+    NativeSettlement,
+    TypedWorkflow,
 }
 
 /// Oracle-only execution evidence for the compiler's source-bound workflow.
@@ -267,9 +303,73 @@ pub struct NativePolicyStorage {
     pub action_limit_units: u64,
 }
 
+/// Exact native payment asset supplied by the authenticated wallet adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderPaymentAsset {
+    pub network: String,
+    pub asset: String,
+    pub decimals: u8,
+}
+
+/// Host-authenticated canonical input. Public JSON evaluation cannot supply this binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCallInput {
+    pub payment_asset: ProviderPaymentAsset,
+    pub service_id: String,
+    pub input_key: String,
+    pub request_digest: String,
+}
+
+/// Source-bound provider requirements, extracted from validated folded IR before funding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCallRequirement {
+    pub payment_asset_id: String,
+    pub operation: String,
+    pub service_id: String,
+    pub input_key: String,
+    pub max_payment_units: u64,
+    pub max_swap_lamports: u64,
+    pub max_service_fee_lamports_per_execution: u64,
+}
+
+/// A source-admitted provider effect. This is neither a payment nor a delivery receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCallPlan {
+    pub payment_asset: ProviderPaymentAsset,
+    pub operation: String,
+    pub service_id: String,
+    pub input_key: String,
+    pub request_digest: String,
+    /// Exact trusted amount checked by the policy and required for native settlement.
+    pub payment_units: u64,
+    pub max_payment_units: u64,
+    pub max_swap_lamports: u64,
+    pub max_service_fee_lamports_per_execution: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Context {
+    #[serde(skip)]
+    #[cfg(feature = "typed-workflow")]
+    pub workflow: Option<alloc::boxed::Box<crate::typed_workflow::WorkflowEnvironment>>,
+    #[serde(skip)]
+    #[cfg(feature = "typed-workflow")]
+    pub execution_request: Option<alloc::boxed::Box<crate::typed_workflow::ExecutionRequest>>,
+    #[serde(skip)]
+    #[cfg(feature = "typed-workflow")]
+    pub curl_request: Option<alloc::boxed::Box<crate::typed_workflow::CurlRequest>>,
+    #[serde(skip)]
+    #[cfg(feature = "typed-workflow")]
+    pub curl_outcome: Option<alloc::boxed::Box<crate::typed_workflow::CurlOutcome>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_deserializing)]
+    #[cfg(feature = "typed-workflow")]
+    pub provider_call_input: Option<ProviderCallInput>,
     /// Trusted current native account state. Adapters must overwrite caller-supplied values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_policy_storage: Option<NativePolicyStorage>,
@@ -298,9 +398,32 @@ pub struct Context {
 fn empty_runtime_context() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
+impl Context {
+    /// Install authenticated host objects together. JSON cannot install this binding.
+    #[cfg(feature = "typed-workflow")]
+    pub fn install_workflow(&mut self, environment: crate::typed_workflow::WorkflowEnvironment) {
+        self.execution_request = environment
+            .execution_request
+            .clone()
+            .map(alloc::boxed::Box::new);
+        self.curl_request = environment.curl_request.clone().map(alloc::boxed::Box::new);
+        self.curl_outcome = environment.curl_outcome.clone().map(alloc::boxed::Box::new);
+        self.workflow = Some(alloc::boxed::Box::new(environment));
+    }
+}
 impl Default for Context {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "typed-workflow")]
+            workflow: None,
+            #[cfg(feature = "typed-workflow")]
+            execution_request: None,
+            #[cfg(feature = "typed-workflow")]
+            curl_request: None,
+            #[cfg(feature = "typed-workflow")]
+            curl_outcome: None,
+            #[cfg(feature = "typed-workflow")]
+            provider_call_input: None,
             native_policy_storage: None,
             amount_units: 0,
             allocation_units: 0,
@@ -323,6 +446,17 @@ impl Default for Context {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Decision {
+    #[serde(default, skip_serializing_if = "Vec::is_empty", skip_deserializing)]
+    #[cfg(feature = "typed-workflow")]
+    pub workflow_outputs: Vec<crate::typed_workflow::WorkflowOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", skip_deserializing)]
+    #[cfg(feature = "typed-workflow")]
+    pub typed_budget_plans: Vec<crate::typed_workflow::TypedBudgetPlan>,
+    /// Only effects on the successful evaluated path. Empty on failure or owner/evidence pauses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_deserializing)]
+    #[cfg(feature = "typed-workflow")]
+    pub system_operations: Vec<ProviderCallPlan>,
     pub outcome: String,
     pub code: String,
     pub reason: String,
@@ -343,6 +477,12 @@ pub struct Decision {
 impl Decision {
     pub fn fail(code: &str, reason: impl Into<String>) -> Self {
         Self {
+            #[cfg(feature = "typed-workflow")]
+            workflow_outputs: Vec::new(),
+            #[cfg(feature = "typed-workflow")]
+            typed_budget_plans: Vec::new(),
+            #[cfg(feature = "typed-workflow")]
+            system_operations: Vec::new(),
             outcome: "fail".into(),
             code: code.into(),
             reason: reason.into(),
@@ -356,6 +496,12 @@ impl Decision {
     }
     pub fn pass() -> Self {
         Self {
+            #[cfg(feature = "typed-workflow")]
+            workflow_outputs: Vec::new(),
+            #[cfg(feature = "typed-workflow")]
+            typed_budget_plans: Vec::new(),
+            #[cfg(feature = "typed-workflow")]
+            system_operations: Vec::new(),
             outcome: "pass".into(),
             code: "PASS".into(),
             reason: "The request satisfies this policy.".into(),

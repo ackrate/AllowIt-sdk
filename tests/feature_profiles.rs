@@ -77,3 +77,62 @@ fn native_storage_fields_require_the_trusted_host_profile() {
     #[cfg(feature = "std")]
     assert!(validate_program(&program).is_ok());
 }
+
+#[test]
+fn host_only_context_is_heap_bounded_for_native_scalar_stack() {
+    assert!(core::mem::size_of::<allowit_sdk::Context>() <= 768);
+}
+
+#[cfg(not(feature = "typed-workflow"))]
+#[test]
+fn scalar_build_rejects_host_workflow_ir_before_any_evaluation() {
+    let program = allowit_sdk::Program {
+        version: "1.1.0".into(),
+        statements: vec![allowit_sdk::Statement::Expression {
+            value: allowit_sdk::Expr::Call {
+                name: "allowit::execution_request_validate".into(),
+                args: Vec::new(),
+                span: allowit_sdk::SourceSpan::default(),
+            },
+            semicolon: true,
+            span: allowit_sdk::SourceSpan::default(),
+        }],
+    };
+    let decision = allowit_sdk::evaluate_ir(
+        &program,
+        allowit_sdk::Profile::Oracle,
+        &allowit_sdk::Context::default(),
+    );
+    assert_eq!(decision.outcome, "fail");
+    assert_eq!(decision.code, "INVALID_POLICY");
+    let serialized = serde_json::to_value(decision).unwrap();
+    assert!(serialized.get("workflow_outputs").is_none());
+    assert!(serialized.get("system_operations").is_none());
+    let mut forged_scalar_version = program.clone();
+    forged_scalar_version.version = IR_VERSION.into();
+    assert!(validate_program(&forged_scalar_version).is_err());
+    if let Statement::Expression {
+        value: Expr::Call { name, .. },
+        ..
+    } = &mut forged_scalar_version.statements[0]
+    {
+        *name = "paysh::call".into();
+    }
+    assert!(validate_program(&forged_scalar_version).is_err());
+}
+
+#[cfg(not(feature = "typed-workflow"))]
+#[test]
+fn scalar_wire_reader_rejects_host_only_ir_nodes() {
+    for value in [
+        serde_json::json!({"kind":"borrow","value":{"kind":"unit"}}),
+        serde_json::json!({"kind":"if_some","name":"request","value":{"kind":"unit"},"then_branch":[],"else_branch":[],"span":{"start":0,"end":0}}),
+        serde_json::json!({"kind":"for_each","name":"request","values":{"kind":"unit"},"body":[],"span":{"start":0,"end":0}}),
+    ] {
+        if value["kind"] == "borrow" {
+            assert!(serde_json::from_value::<Expr>(value).is_err());
+        } else {
+            assert!(serde_json::from_value::<Statement>(value).is_err());
+        }
+    }
+}

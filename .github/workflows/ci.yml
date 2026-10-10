@@ -30,8 +30,14 @@ jobs:
         run: |
           cargo check --locked --no-default-features --lib
           cargo check --locked --no-default-features --features compiler --lib
+          cargo check --locked --no-default-features --features typed-workflow --lib
+          cargo check --locked --no-default-features --features std --lib
+          cargo check --locked --no-default-features --features std,oracle-ledger --lib
+          cargo check --locked --no-default-features --features typed-workflow,oracle-ledger --lib
           cargo check --locked --no-default-features --features oracle-ledger --lib
           cargo test --locked --no-default-features --test feature_profiles
+          cargo test --locked --no-default-features --features typed-workflow --test typed_host_feature
+          cargo test --locked --no-default-features --features std,typed-workflow
       - run: cargo rustc --locked --release --lib --target wasm32-unknown-unknown --crate-type cdylib
       - run: node scripts/test-wasm.mjs
       - run: |

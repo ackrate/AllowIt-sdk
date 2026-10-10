@@ -224,12 +224,12 @@ impl Parser {
             let count = usize::from(name == "cap_purchase_tiers");
             let currency = self.expr(&call.args[index + 1 + count], depth + 1)?;
             let decimals = self.expr(&call.args[index + 2 + count], depth + 1)?;
-            if !matches!(&currency,Expr::String{value} if value=="USDC")
+            if !matches!(&currency,Expr::String{value} if !value.is_empty() && value.len()<=128)
                 || !matches!(decimals, Expr::Integer { value: 6 })
             {
                 return Err(error(
                     call.span(),
-                    "This profile supports the bound USDC asset with exactly six decimals.",
+                    "Use one explicit bound asset identifier with exactly six decimals.",
                 ));
             }
             let amount = if value % 1_000_000 == 0 {
@@ -750,6 +750,29 @@ impl Parser {
                 )?,
                 span,
             },
+            Stmt::Expr(SynExpr::ForLoop(f), _) => {
+                if !f.attrs.is_empty() || f.label.is_some() {
+                    return Err(error(
+                        f.span(),
+                        "Only bounded typed collection loops are supported.",
+                    ));
+                }
+                let Pat::Ident(binding) = &*f.pat else {
+                    return Err(error(f.span(), "Use one immutable loop binding."));
+                };
+                if binding.mutability.is_some()
+                    || binding.by_ref.is_some()
+                    || binding.subpat.is_some()
+                {
+                    return Err(error(f.span(), "Use one immutable loop binding."));
+                }
+                Statement::ForEach {
+                    name: binding.ident.to_string(),
+                    values: self.expr(&f.expr, depth + 1)?,
+                    body: self.block(&f.body, depth + 1)?,
+                    span: range(f.span()),
+                }
+            }
             Stmt::Expr(SynExpr::If(i), _) => self.if_statement(i, depth + 1)?,
             Stmt::Expr(expr, semi) => Statement::Expression {
                 value: self.expr(expr, depth + 1)?,
@@ -780,6 +803,34 @@ impl Parser {
         } else {
             vec![]
         };
+        if let SynExpr::Let(condition) = &*i.cond {
+            if !condition.attrs.is_empty() {
+                return Err(error(condition.span(), "Attributes are not supported."));
+            }
+            let Pat::TupleStruct(pattern) = &*condition.pat else {
+                return Err(error(
+                    condition.span(),
+                    "Use if let Some(name) = optional_value.",
+                ));
+            };
+            if !simple_path(&pattern.path, "Some") || pattern.elems.len() != 1 {
+                return Err(error(pattern.span(), "Only Some extraction is supported."));
+            }
+            let Pat::Ident(binding) = &pattern.elems[0] else {
+                return Err(error(pattern.span(), "Use one immutable Some binding."));
+            };
+            if binding.mutability.is_some() || binding.by_ref.is_some() || binding.subpat.is_some()
+            {
+                return Err(error(pattern.span(), "Use one immutable Some binding."));
+            }
+            return Ok(Statement::IfSome {
+                name: binding.ident.to_string(),
+                value: self.expr(&condition.expr, depth + 1)?,
+                then_branch: self.block(&i.then_branch, depth + 1)?,
+                else_branch,
+                span: range(i.span()),
+            });
+        }
         Ok(Statement::If {
             condition: self.expr(&i.cond, depth + 1)?,
             then_branch: self.block(&i.then_branch, depth + 1)?,
@@ -932,6 +983,9 @@ impl Parser {
             {
                 self.expr(&r.expr, depth + 1)?
             }
+            SynExpr::Reference(r) if r.mutability.is_none() => Expr::Borrow {
+                value: Box::new(self.expr(&r.expr, depth + 1)?),
+            },
             SynExpr::Try(t) => match self.readable_helper(&t.expr, depth + 1)? {
                 Some(lowered) => lowered,
                 None => Expr::Try {
@@ -1042,9 +1096,10 @@ fn walk_expr(expr: &Expr, calls: &mut Vec<(String, SourceSpan)>) {
                 walk_expr(arg, calls);
             }
         }
-        Expr::Try { value } | Expr::Await { value } | Expr::Not { value } => {
-            walk_expr(value, calls)
-        }
+        Expr::Borrow { value }
+        | Expr::Try { value }
+        | Expr::Await { value }
+        | Expr::Not { value } => walk_expr(value, calls),
         Expr::Field { object, .. } => walk_expr(object, calls),
         Expr::Binary { left, right, .. } => {
             walk_expr(left, calls);
@@ -1069,10 +1124,20 @@ fn walk_block(block: &[Statement], calls: &mut Vec<(String, SourceSpan)>) {
                 then_branch,
                 else_branch,
                 ..
+            }
+            | Statement::IfSome {
+                value: condition,
+                then_branch,
+                else_branch,
+                ..
             } => {
                 walk_expr(condition, calls);
                 walk_block(then_branch, calls);
                 walk_block(else_branch, calls);
+            }
+            Statement::ForEach { values, body, .. } => {
+                walk_expr(values, calls);
+                walk_block(body, calls);
             }
         }
     }
@@ -1092,6 +1157,9 @@ pub fn compile(source: &str) -> Result<CompiledPolicy, CompileError> {
 }
 
 fn compile_inner(source: &str) -> Result<CompiledPolicy, CompileError> {
+    if source.chars().any(|c| matches!(c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}'|'\u{200e}'|'\u{200f}'|'\u{061c}')) {
+        return Err(CompileError::new("INVALID_POLICY","Bidirectional text controls are not allowed in policy source."));
+    }
     if source.starts_with('\u{feff}') {
         return Err(CompileError::new(
             "INVALID_POLICY",
@@ -1175,10 +1243,13 @@ fn compile_inner(source: &str) -> Result<CompiledPolicy, CompileError> {
         helper_calls: vec![],
         preference_steps: vec![],
     };
-    let ir = Program {
+    let mut ir = Program {
         version: IR_VERSION.into(),
         statements: parser.block(&f.block, 0)?,
     };
+    if crate::typed_workflow::required(&ir) {
+        ir.version = crate::TYPED_IR_VERSION.into();
+    }
     validate_program(&ir)?;
     let source_hash = digest(source.as_bytes());
     let ir_hash = canonical_ir_hash(&ir)?;
@@ -1292,8 +1363,19 @@ fn compile_inner(source: &str) -> Result<CompiledPolicy, CompileError> {
         ir_hash,
         registry_version: REGISTRY_VERSION.into(),
         execution_requirements: crate::requirements::extract(&ir)?,
+        provider_call_requirements: crate::requirements::provider_calls(&ir)?,
+        typed_workflow_requirements: crate::validation::typed_nodes(&ir)?,
+        typed_budget_requirements: crate::validation::typed_budgets(&ir)?,
         limit,
-        token: "USDC".into(),
+        token: if crate::typed_workflow::required(&ir)
+            && !crate::validation::provider_call_required(&ir)
+        {
+            String::new()
+        } else {
+            crate::validation::provider_asset_id(&ir)
+                .unwrap_or("USDC")
+                .into()
+        },
         source: source.into(),
         workflow,
         calls,
@@ -1544,10 +1626,12 @@ fn validate_block_shapes(tokens: &proc_macro2::TokenStream) -> Result<(), Compil
                 TokenTree::Ident(ident)
                     if ident == "let"
                         || ident == "if"
+                        || ident == "for"
                         || ident == "return"
                         || ident == "Ok"
                         || ident == "allowit"
                         || ident == "jev"
+                        || ident == "paysh"
                         || crate::registry::function(&ident.to_string()).is_some() =>
                 {
                     current.after_if_body = false;
@@ -1609,7 +1693,9 @@ fn validate_block_shapes(tokens: &proc_macro2::TokenStream) -> Result<(), Compil
                 stack.push(frame(group.stream(), scope, depth));
             }
             TokenTree::Ident(ident) => {
-                if current.scope != Scope::File && (ident == "allowit" || ident == "jev") {
+                if current.scope != Scope::File
+                    && (ident == "allowit" || ident == "jev" || ident == "paysh")
+                {
                     let mut lookahead = current.iter.clone();
                     if matches!(lookahead.next(), Some(TokenTree::Punct(p)) if p.as_char() == ':' && p.spacing() == proc_macro2::Spacing::Joint)
                         && matches!(lookahead.next(), Some(TokenTree::Punct(p)) if p.as_char() == ':')
@@ -1636,7 +1722,7 @@ fn validate_block_shapes(tokens: &proc_macro2::TokenStream) -> Result<(), Compil
                 if current.scope != Scope::File
                     && [
                         "as", "type", "fn", "impl", "dyn", "const", "static", "struct", "enum",
-                        "union", "trait", "mod", "use", "extern", "for", "while", "loop", "match",
+                        "union", "trait", "mod", "use", "extern", "while", "loop", "match",
                         "unsafe", "async", "move",
                     ]
                     .contains(&ident.to_string().as_str())
@@ -1664,6 +1750,20 @@ fn validate_block_shapes(tokens: &proc_macro2::TokenStream) -> Result<(), Compil
                             ));
                         }
                         validate_let_header(&mut current.iter)?;
+                    } else if ident == "for" {
+                        if !current.statement_start {
+                            return Err(error(
+                                ident.span(),
+                                "for is supported only as a bounded collection statement.",
+                            ));
+                        }
+                        current.expects_body = true;
+                        let Some(TokenTree::Ident(_)) = current.iter.next() else {
+                            return Err(error(ident.span(), "Use for name in collection."));
+                        };
+                        if !matches!(current.iter.next(), Some(TokenTree::Ident(n)) if n=="in") {
+                            return Err(error(ident.span(), "Use for name in collection."));
+                        }
                     } else if ident == "if" {
                         if !current.statement_start && !current.pending_else {
                             return Err(error(
@@ -1673,6 +1773,19 @@ fn validate_block_shapes(tokens: &proc_macro2::TokenStream) -> Result<(), Compil
                         }
                         current.expects_body = true;
                         current.pending_else = false;
+                        if matches!(current.iter.clone().next(),Some(TokenTree::Ident(n)) if n=="let")
+                        {
+                            current.iter.next();
+                            if !matches!(current.iter.next(),Some(TokenTree::Ident(n)) if n=="Some")
+                                || !matches!(current.iter.next(),Some(TokenTree::Group(g)) if g.delimiter()==Delimiter::Parenthesis)
+                                || !matches!(current.iter.next(),Some(TokenTree::Punct(p)) if p.as_char()=='=')
+                            {
+                                return Err(error(
+                                    ident.span(),
+                                    "Use if let Some(name) = optional_value.",
+                                ));
+                            }
+                        }
                     } else if ident == "else" {
                         return Err(error(
                             ident.span(),

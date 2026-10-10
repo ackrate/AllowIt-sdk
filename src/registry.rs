@@ -8,6 +8,8 @@ pub struct FunctionInfo {
     pub description: String,
     pub signature: String,
     pub effect: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed_signature: Option<crate::typed_workflow::WorkflowSignature>,
 }
 pub fn registry() -> Vec<FunctionInfo> {
     let functions: Vec<FunctionInfo> = [
@@ -31,7 +33,7 @@ pub fn registry() -> Vec<FunctionInfo> {
         ("stored_limit", "Read native policy storage", "Reads a declared limit from verified current native account state. Missing trusted state prevents approval.", "stored_limit(ctx: &Context, limit: OwnerLimit) -> Result<u64, PolicyError>", "native_storage"),
         ("is_one_of", "List membership", "Checks whether the primitive string equals an entry in a bounded inline or constructor list.", "is_one_of(value: &str, allowed: &[&str]) -> Result<bool, PolicyError>", "pure"),
         ("fail", "Reject the request", "Stops evaluation and rejects the request with this explanation. No spending is authorized.", "fail(reason: &str) -> PolicyResult", "pure"),
-    ].into_iter().map(|(name,title,description,signature,effect)| FunctionInfo { name:name.into(), title:title.into(), description:description.into(), signature:signature.into(), effect:effect.into() }).collect();
+    ].into_iter().map(|(name,title,description,signature,effect)| FunctionInfo { name:name.into(), title:title.into(), description:description.into(), signature:signature.into(), effect:effect.into(), typed_signature:None }).collect();
     let mut result = functions.clone();
     for function in functions {
         let mut qualified = function.clone();
@@ -62,6 +64,44 @@ pub fn registry() -> Vec<FunctionInfo> {
             result.push(qualified);
         }
     }
+    result.push(FunctionInfo {
+        name: "paysh::call".into(), title: "Paid provider call".into(),
+        description: "Admits one call using authenticated run input and exact payment, swap and service-fee ceilings. True means admitted plan, not payment or delivery. The host settles through the selected native wallet and provider adapter after every policy guard passes.".into(),
+        signature: "paysh::call(service_id: &str, input_key: &str, max_payment_units: u64, max_swap_lamports: u64, max_service_fee_lamports_per_execution: u64) -> bool".into(),
+        effect: "provider_call".into(), typed_signature:None,
+    });
+    for (name, title, description, signature) in [
+        (
+            "allowit::execution_request_validate",
+            "Validate native request",
+            "Checks the complete request through the installed native profile. Structural validity is not spending approval.",
+            "allowit::execution_request_validate(request: &ExecutionRequest) -> Result<ValidatedExecutionRequest>",
+        ),
+        (
+            "paysh::payment_request_from_curl",
+            "Convert payment challenge",
+            "Converts an authenticated bound challenge into unsigned payment facts. None means a valid bound free response; failures remain errors.",
+            "paysh::payment_request_from_curl(outcome: &CurlOutcome, request: &CurlRequest) -> Result<Option<PaymentRequest>>",
+        ),
+    ] {
+        result.push(FunctionInfo {
+            name: name.into(),
+            title: title.into(),
+            description: description.into(),
+            signature: signature.into(),
+            effect: "pure_validation".into(),
+            typed_signature: crate::typed_workflow::signature(name),
+        });
+    }
+    for (name, ty) in [
+        (
+            "allowit::execution_request_cap",
+            "ValidatedExecutionRequest",
+        ),
+        ("allowit::payment_request_cap", "PaymentRequest"),
+    ] {
+        result.push(FunctionInfo{name:name.into(),title:"Typed asset budget".into(),description:"Checks complete same-asset debit and cumulative fee bounds against an owner-authored total budget and protected prior consumption. Other assets need separate guards. The host atomically reserves the approved plan before signing.".into(),signature:alloc::format!("{name}(request: &{ty}, budget_id: &str, asset_id: &str, decimals: u64, total_budget_units: u64, max_debit_units: u64, max_fee_units: u64) -> PolicyResult"),effect:"budget_guard".into(),typed_signature:crate::typed_workflow::signature(name)});
+    }
     result
 }
 
@@ -75,5 +115,8 @@ pub(crate) fn function(name: &str) -> Option<FunctionInfo> {
 #[cfg(feature = "compiler")]
 pub(crate) fn canonical_function(name: &str) -> Option<String> {
     function(name)?;
+    if name == "paysh::call" || crate::typed_workflow::signature(name).is_some() {
+        return Some(name.into());
+    }
     Some(name.rsplit("::").next()?.into())
 }

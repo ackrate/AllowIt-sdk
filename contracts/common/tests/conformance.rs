@@ -291,3 +291,26 @@ fn qualified_functions_keep_chain_artifact_and_request_bindings() {
         Err(Error::BindingMismatch)
     );
 }
+
+#[test]
+fn authenticated_host_workflow_ir_is_not_admitted_by_chain_or_binary_profile() {
+    let state = fixture(include_str!(
+        "../../../tests/fixtures/typed-execution-policy.rs"
+    ));
+    assert_eq!(
+        validate_artifact(&state.mandate, &state.artifact).unwrap_err(),
+        Error::InvalidArtifact
+    );
+    let artifact: allowit_contract_core::Artifact =
+        serde_json::from_slice(&state.artifact).unwrap();
+    assert_eq!(
+        allowit_contract_core::binary::encode(&artifact),
+        Err(Error::InvalidArtifact)
+    );
+    let mut forged = artifact;
+    forged.ir.version = "1.0.0".into();
+    assert_eq!(
+        allowit_contract_core::binary::encode(&forged),
+        Err(Error::InvalidArtifact)
+    );
+}

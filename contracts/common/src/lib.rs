@@ -32,7 +32,13 @@ pub fn validate_chain_artifact(mandate: &Mandate, bytes: &[u8]) -> Result<(), Er
     validate_chain_program(&artifact.ir)
 }
 
+// SDK host features can be unified by native callers; every non-chain node fails closed.
+#[allow(unreachable_patterns)]
 fn validate_chain_program(program: &Program) -> Result<(), Error> {
+    // Authenticated host workflow handles are not executable by this chain profile.
+    if program.version != "1.0.0" {
+        return Err(Error::InvalidArtifact);
+    }
     use allowit_sdk::{Expr, Statement};
     enum Node<'a> {
         S(&'a Statement),
@@ -76,13 +82,25 @@ fn validate_chain_program(program: &Program) -> Result<(), Error> {
                 pending.push((Node::E(left), next));
                 pending.push((Node::E(right), next));
             }
-            Node::E(Expr::Call { name, .. }) if name == "cap_purchase_tiers" => {
+            Node::E(Expr::Call { name, .. })
+                if matches!(
+                    name.as_str(),
+                    "cap_purchase_tiers" | "allowit::cap_purchase_tiers" | "paysh::call"
+                ) =>
+            {
                 return Err(Error::InvalidArtifact);
             }
             Node::E(Expr::Array { values } | Expr::Call { args: values, .. }) => {
                 pending.extend(values.iter().map(|e| (Node::E(e), next)))
             }
-            Node::E(_) => {}
+            Node::E(
+                Expr::String { .. }
+                | Expr::Integer { .. }
+                | Expr::Boolean { .. }
+                | Expr::Unit
+                | Expr::Variable { .. },
+            ) => {}
+            _ => return Err(Error::InvalidArtifact),
         }
     }
     Ok(())
@@ -488,6 +506,7 @@ fn prepare_execution_with(
         confidence,
         original_intent: artifact.original_intent,
         runtime_context,
+        ..Context::default()
     };
     let decision = evaluate_ir(&artifact.ir, Profile::Contract, &context);
     if decision.outcome != "pass" {
@@ -514,4 +533,101 @@ pub fn record_execution(state: &mut State, request: &Request) -> Result<(), Erro
         .ok_or(Error::Overflow)?;
     state.next_nonce = state.next_nonce.checked_add(1).ok_or(Error::Overflow)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod typed_profile_rejection {
+    use super::*;
+
+    #[test]
+    fn forged_scalar_version_does_not_admit_host_workflow_nodes() {
+        let mut program = allowit_sdk::compile(include_str!(
+            "../../../tests/fixtures/typed-execution-policy.rs"
+        ))
+        .unwrap()
+        .ir;
+        program.version = "1.0.0".into();
+        assert_eq!(
+            validate_chain_program(&program),
+            Err(Error::InvalidArtifact)
+        );
+    }
+
+    #[test]
+    fn minimal_host_nodes_fail_without_depth_or_hash_checks() {
+        use allowit_sdk::{Expr, SourceSpan, Statement};
+        let span = SourceSpan::default();
+        for statement in [
+            Statement::IfSome {
+                name: "value".into(),
+                value: Expr::Unit,
+                then_branch: Vec::new(),
+                else_branch: Vec::new(),
+                span,
+            },
+            Statement::ForEach {
+                name: "value".into(),
+                values: Expr::Array { values: Vec::new() },
+                body: Vec::new(),
+                span,
+            },
+            Statement::Expression {
+                value: Expr::Borrow {
+                    value: alloc::boxed::Box::new(Expr::Unit),
+                },
+                semicolon: true,
+                span,
+            },
+        ] {
+            let program = Program {
+                version: "1.0.0".into(),
+                statements: alloc::vec![statement],
+            };
+            assert_eq!(
+                validate_chain_program(&program),
+                Err(Error::InvalidArtifact)
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_purchase_ledger_call_is_rejected_by_chain_reader() {
+        use allowit_sdk::{Expr, SourceSpan, Statement};
+        let span = SourceSpan::default();
+        let program = Program {
+            version: "1.0.0".into(),
+            statements: alloc::vec![Statement::Expression {
+                value: Expr::Call {
+                    name: "allowit::cap_purchase_tiers".into(),
+                    args: Vec::new(),
+                    span
+                },
+                semicolon: true,
+                span
+            }],
+        };
+        assert_eq!(
+            validate_chain_program(&program),
+            Err(Error::InvalidArtifact)
+        );
+    }
+
+    #[test]
+    fn binary_encoder_rejects_typed_version_even_with_only_scalar_nodes() {
+        let compiled = allowit_sdk::compile(
+            "pub async fn evaluate(ctx: &Context) -> PolicyResult { set_cap(ctx, \"1\", \"USDC\")?; Ok(()) }",
+        )
+        .unwrap();
+        let mut artifact = Artifact {
+            original_intent: String::new(),
+            source_hash: compiled.source_hash,
+            ir_hash: compiled.ir_hash,
+            registry_version: compiled.registry_version,
+            core_version: CORE_VERSION.into(),
+            compiler_version: CORE_VERSION.into(),
+            ir: compiled.ir,
+        };
+        artifact.ir.version = "1.1.0".into();
+        assert_eq!(binary::encode(&artifact), Err(Error::InvalidArtifact));
+    }
 }

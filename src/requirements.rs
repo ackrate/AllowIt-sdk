@@ -8,6 +8,7 @@ struct Collector {
     features: BTreeSet<ExecutionFeature>,
     keys: BTreeSet<String>,
     dynamic: bool,
+    provider_calls: Vec<crate::ProviderCallRequirement>,
 }
 
 impl Collector {
@@ -15,6 +16,44 @@ impl Collector {
         match expr {
             Expr::Call { name, args, .. } => {
                 let feature = match name.as_str() {
+                    "paysh::call" => {
+                        let [
+                            Expr::String { value: service_id },
+                            Expr::String { value: input_key },
+                            Expr::Integer {
+                                value: max_payment_units,
+                            },
+                            Expr::Integer {
+                                value: max_swap_lamports,
+                            },
+                            Expr::Integer {
+                                value: max_service_fee_lamports_per_execution,
+                            },
+                        ] = args.as_slice()
+                        else {
+                            return Err(CompileError::new(
+                                "UNSUPPORTED_REQUIREMENT",
+                                "Provider requirements require validated source constants.",
+                            ));
+                        };
+                        self.provider_calls.push(crate::ProviderCallRequirement {
+                            payment_asset_id: String::new(),
+                            operation: name.clone(),
+                            service_id: service_id.clone(),
+                            input_key: input_key.clone(),
+                            max_payment_units: *max_payment_units,
+                            max_swap_lamports: *max_swap_lamports,
+                            max_service_fee_lamports_per_execution:
+                                *max_service_fee_lamports_per_execution,
+                        });
+                        self.features.insert(ExecutionFeature::PaidHttpCall);
+                        self.features.insert(ExecutionFeature::NativeSettlement);
+                        Some(ExecutionFeature::ProviderCall)
+                    }
+                    "allowit::execution_request_validate"
+                    | "paysh::payment_request_from_curl"
+                    | "allowit::execution_request_cap"
+                    | "allowit::payment_request_cap" => Some(ExecutionFeature::TypedWorkflow),
                     "semantic" => Some(ExecutionFeature::SemanticEvidence),
                     "confidence" => Some(ExecutionFeature::ConfidenceEvidence),
                     "require_user_input" => Some(ExecutionFeature::OwnerInput),
@@ -50,9 +89,10 @@ impl Collector {
                     self.expr(arg)?;
                 }
             }
-            Expr::Try { value } | Expr::Await { value } | Expr::Not { value } => {
-                self.expr(value)?
-            }
+            Expr::Borrow { value }
+            | Expr::Try { value }
+            | Expr::Await { value }
+            | Expr::Not { value } => self.expr(value)?,
             Expr::Field { object, name } => {
                 if name == "native_daily_limit" || name == "native_action_limit" {
                     self.features.insert(ExecutionFeature::NativePolicyStorage);
@@ -88,10 +128,20 @@ impl Collector {
                     then_branch,
                     else_branch,
                     ..
+                }
+                | Statement::IfSome {
+                    value: condition,
+                    then_branch,
+                    else_branch,
+                    ..
                 } => {
                     self.expr(condition)?;
                     self.block(then_branch)?;
                     self.block(else_branch)?;
+                }
+                Statement::ForEach { values, body, .. } => {
+                    self.expr(values)?;
+                    self.block(body)?;
                 }
             }
         }
@@ -108,6 +158,25 @@ pub(crate) fn extract(program: &Program) -> Result<ExecutionRequirements, Compil
         context_u64_keys: collector.keys.into_iter().collect(),
         dynamic_context_keys: collector.dynamic,
     })
+}
+
+pub(crate) fn provider_calls(
+    program: &Program,
+) -> Result<Vec<crate::ProviderCallRequirement>, CompileError> {
+    let mut collector = Collector::default();
+    collector.block(&program.statements)?;
+    if !collector.provider_calls.is_empty() {
+        let asset = crate::validation::provider_asset_id(program).ok_or_else(|| {
+            CompileError::new(
+                "UNSUPPORTED_REQUIREMENT",
+                "Provider payment asset requires an unconditional numeric guard.",
+            )
+        })?;
+        for call in &mut collector.provider_calls {
+            call.payment_asset_id = asset.into();
+        }
+    }
+    Ok(collector.provider_calls)
 }
 
 #[cfg(test)]

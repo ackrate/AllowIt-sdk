@@ -12,7 +12,7 @@ fn constructor_and_primitives_preserve_real_accounting() {
     let source = include_str!("fixtures/constructor-policy.rs");
     let policy = compile(source).unwrap();
     assert_eq!(policy.limit, "5");
-    assert_eq!(policy.registry_version, "1.2.0");
+    assert_eq!(policy.registry_version, "1.4.0");
     for profile in [Profile::Oracle, Profile::Contract] {
         let mut ctx = context();
         ctx.amount_units = 2_000_000;

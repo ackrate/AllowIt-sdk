@@ -21,7 +21,7 @@ async fn _execute(ctx: &Context, params: &PolicyParams) -> PolicyResult {
 }
 ```
 
-The Go [action CLI](https://github.com/AllowIt-hq/allowit-cli) is a separate client for `allowit show`, `eval`, `exec` and `status`. This repository's Rust CLI is a developer compiler/evaluator tool; use the repository-local Cargo commands below so the two executables are not confused. The app server owns HTTP transport. Hosted-agent control and runtime are optional, outside the MVP; they are not SDK responsibilities. Restricted Rust remains the policy source and enforcement language.
+The Rust [action CLI](https://github.com/AllowIt-hq/allowit-cli) is a separate client for `allowit show`, `eval`, `exec` and `status`. This repository's Rust CLI is a developer compiler/evaluator tool; use the repository-local Cargo commands below so the two executables are not confused. The app server owns HTTP transport. Hosted-agent control and runtime are optional, outside the MVP; they are not SDK responsibilities. Restricted Rust remains the policy source and enforcement language.
 
 ## Policy source and configuration
 
@@ -48,7 +48,7 @@ fn new() -> PolicyParams {
 
 Inside the handler, `allowit::stored_limit(ctx, params.action_limit)?` returns the current owner-controlled primitive. The native adapter supplies verified account state through `Context.native_policy_storage`. The JSON protocol rejects `native_policy_storage`. Trusted adapters use the typed evaluator. Request JSON and `runtime_context` are not storage. The adapter checks constructor defaults against the original installation and reads current limits after owner-authorized updates. Only the two named native fields are admitted. Missing state fails closed. The portable contract profile rejects native storage, including unreachable reads.
 
-The registry identifies this source profile as 1.2.0. Historical one-argument source profiles retain their old compiler semantics for artifact validation and recovery. Current primitive Rust exports do not reproduce historical whole-context signatures. New generation uses the constructor profile. Typed vendor movements require their own implemented source and execution binding.
+The registry identifies this source profile as 1.4.0. Historical one-argument source profiles retain their old compiler semantics for artifact validation and recovery. Current primitive Rust exports do not reproduce historical whole-context signatures. New generation uses the constructor profile. Typed vendor movements require their own implemented source and execution binding.
 
 ## Run
 
@@ -85,8 +85,7 @@ Each registered policy function accepts an explicit `allowit::` prefix. `jev::se
 
 Namespaces identify policy checks. A core check such as `allowit::allow_actions` compares exact labels. It does not execute or classify a vendor operation. PaySH and other vendor prefixes require concrete operations with their own bounded implementation and execution bindings. The restricted compiler rejects `paysh::pay`, `paysh::swap` and other unregistered vendor calls. Native vendor transport requires a separate execution interface.
 
-Source registry 1.2.0 requires compatible rebuilt rail contracts. Contracts that
-accept only registry 1.0.0 reject these new artifacts. This change does not deploy contracts.
+Source registry 1.4.0 requires compatible rebuilt rail contracts. Contracts whose readers do not accept registry 1.4.0 reject these new artifacts. This change does not deploy contracts.
 
 Qualified calls preserve the current interpreter, contract opcodes and execution requirements. Source spans and source hashes still bind the exact policy text. Changing the spelling therefore requires a new compiled artifact and the corresponding mandate binding. Solana and Stellar adapters consume that artifact through the shared contract core. A Near adapter requires its own host, asset, authorization and settlement integration.
 
@@ -122,6 +121,10 @@ The [agent skill](skills/allowit/SKILL.md) includes JSON-context instructions, s
 
 ## Embedding and wire protocol
 
+Host workflow evaluation and registered provider calls require the `typed-workflow` feature. The compiler enables it automatically. A host without the compiler enables it explicitly, including with `no_std`. Scalar chain interpreters use no default features and reject host workflow IR and provider calls.
+
+With this feature, the public `Context.workflow`, `execution_request`, `curl_request` and `curl_outcome` fields are `Option<Box<T>>`. Direct construction requires `Box::new`. `install_workflow` accepts an unboxed `WorkflowEnvironment` and installs its authenticated records together. Public JSON cannot install these records. Builds without this feature omit these fields, `provider_call_input`, and the host effect fields of `Decision`.
+
 Native callers use `process_value(serde_json::Value) -> serde_json::Value` or `process_json(&str) -> String`. The JSON API always compiles source before evaluation and rejects externally supplied executable IR.
 
 Compiler output includes versioned [execution requirements](docs/execution-requirements.md), a conservative inventory of policy dependencies used by host skill assemblers. It does not grant permissions or assert that a dependency is reachable.
@@ -153,6 +156,8 @@ Hosts must bind each trace to the request, evaluation attempt and approved revis
 
 Contract adapters use `default-features = false`, `validate_program`, `canonical_ir_hash` and `evaluate_ir`. The contract must authenticate the IR artifact during owner activation and bind it to the action, owner, network, asset, current budget, original intent, runtime-context digest and authority. The `no_std` evaluator validates the complete IR but does not contain the source parser; it does not claim to recompile source on chain. Source digests are owner-bound metadata there. Native `evaluate` recompiles source to reject a forged source/IR correspondence and is available only with the compiler feature.
 
+The registered `paysh::call(service_id, input_key, max_payment_units, max_swap_lamports, max_service_fee_lamports_per_execution) -> bool` admits a paid provider plan. Its five arguments use two strings and three integer ceilings, each written as a literal or initialized constructor constant. The admitted plan binds `payment_units` to the trusted amount evaluated by policy guards; that amount must be positive and within the source ceiling. Supply `Context.provider_call_input` only from an authenticated typed host adapter, with the canonical input digest. Public JSON evaluation rejects this binding. `CompiledPolicy.provider_call_requirements` exposes source constants from validated IR before funding. `evaluate_with_trace` returns `Decision.system_operations` only after all executed policy checks pass. Owner/evidence pauses and refusals expose no effects. The adapter must bind the plan to the authenticated run and settle exactly `payment_units`, enforce its ceilings and native wallet limits, deduplicate settlement by run and canonical input digest, and record payment and delivery separately. The fifth argument sets the per-execution fee ceiling; the host must reject an installation whose configured service fee exceeds it. The external host adapter must bind service identity, exact mint/network, payment amount, swap and service-fee ceilings, and the authenticated run/input to each evaluator-signed native request. The owner signs installed configuration, not each execution. Native requests do not enforce operation-ID uniqueness; the host must persist a single nonce for each run/input/step and reuse it for replacements. Native period fee and total SOL caps still apply. At most one provider call executes per policy evaluation; separate branches may contain distinct call sites. Contract evaluation rejects this host operation; a fixed native wallet settles the adapter's signed bounded request rather than executing arbitrary Rust. The direct Rust source facade returns false because it has no authenticated host adapter.
+
 ## WebAssembly
 
 ```sh
@@ -172,13 +177,13 @@ The artifact is `target/wasm32-unknown-unknown/release/allowit_sdk.wasm`. It imp
 
 ## Verification boundaries
 
-The [Lean demonstrator](verification/lean/README.md) supplies a pinned, checked model of compositional policy decisions and instruction-feature coverage. Its theorems do not establish Rust/Go implementation equivalence, complete natural-language intent coverage or classifier accuracy.
+The [Lean demonstrator](verification/lean/README.md) supplies a pinned, checked model of compositional policy decisions and instruction-feature coverage. Its theorems do not establish implementation equivalence, complete natural-language intent coverage or classifier accuracy.
 
 Tests cover exact limits, cap bypass attempts, arithmetic overflow, syntax rejection, forged IR, deterministic oracle/contract decisions, source spans, workflow retention, confidence failures, approval continuation keys, contract input failure, facade type-checking, LSP behavior and a seeded bounded mutation corpus. `contracts/` contains native rail adapters and their own build/test instructions. Compilation or a local contract test is not evidence that a program has been deployed or that funds moved on a public network.
 
 ## Readable amounts and comparisons
 
-These helpers require source compiler revision `65a9bfe12f5abcbc7786a37b15f7f7a34f708dbd` or later. Older compilers reject helper source; the existing IR registry remains compatible because helpers lower to its existing operations. Hosts must pin the compiler artifact.
+These helpers require source compiler revision `65a9bfe12f5abcbc7786a37b15f7f7a34f708dbd` or later. Older compilers reject helper source; IR version 1.0.0 remains compatible because helpers lower to its existing operations. Hosts must pin the compiler artifact.
 
 Use decimal strings in policy source; runtime context remains JSON with integer base units. The compiler checks these helpers and lowers them to the existing integer/comparison IR used by every rail. No floats or rounding are involved. Keep the `?` on each helper.
 
@@ -219,13 +224,35 @@ Thresholds are exact source decimals in 0..1 with at most four decimal places. `
 
 The trusted oracle host supplies `purchase_counts`, exactly 40 unsigned counts derived from its durable ledger, including pending reservations. Callers must not supply authoritative counts through runtime context. Reservation and final evaluation must recheck counts atomically. Missing counts fail with `LEDGER_REQUIRED`. The current contract adapters reject tier policies at activation because they do not store this ledger; the contract evaluator also fails closed. A compiled tier badge describes oracle enforcement, not an on-chain certificate.
 
-Consumers need a build containing this helper; older evaluators fail closed on the new registry call. Wire registry version remains unchanged, so use the SDK commit and artifact digest for compatibility. Context continues to enter the CLI or SDK as JSON; user-supplied runtime evidence is separate from authoritative ledger fields.
+Consumers need a build containing this helper; older evaluators fail closed on the new registry call. Use registry 1.4-compatible readers and pin the SDK commit and artifact digest for compatibility. Context continues to enter the CLI or SDK as JSON; user-supplied runtime evidence is separate from authoritative ledger fields.
 
 The default `oracle-ledger` feature includes host purchase counters. Contract builds disable default features and return `LEDGER_REQUIRED` for tier calls, excluding ledger-only code from tight on-chain upload budgets.
 
 Builds without `oracle-ledger` reject purchase-tier IR during validation with `LEDGER_REQUIRED`, before any evaluation. The registry still describes the function so callers can identify this unsupported feature. The public `spending` module is available only with `oracle-ledger`. Default SDK WASM and host builds include it; contract builds exclude it.
 
 
+Provider policies declare their exact payment asset in one unconditional `set_cap`
+guard. The compiler projects that literal into `CompiledPolicy.token` and
+`provider_call_requirements[].payment_asset_id`. The authenticated host sets
+`Context.token` to this mint and supplies `ProviderCallInput.payment_asset`
+with the verified network, mint and six decimals. A source guard for `USDC`
+does not accept the Testnet demo token. Legacy policies keep their USDC profile.
+Provider binding cannot round-trip through JSON; the host assigns it through the
+typed API after authenticating the canonical run input. Execute effects only from
+an in-process successful evaluation, never from a deserialized decision. Hosts
+must deduplicate by canonical run/input identity and verify all native authority
+and settlement bounds. `evaluate_ir` also requires the host to choose and enforce
+the supported execution profile. Deploy registry 1.4 readers before authoring
+any policy with this compiler; older readers reject registry 1.4 artifacts.
+
+
 ## License
 
 AllowIt-authored source is MIT licensed. Third-party licenses and the companion materials required when redistributing SDK or contract binaries, including historical Actions artifacts, are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Keep the full [licenses/](licenses/) directory and root license with redistributed binaries.
+
+
+All newly compiled policies use registry 1.4.0, including legacy-shaped policies. Rebuild and redeploy compatible rail readers before using new artifacts. Historical 1.3.0 provider artifacts with a symbol asset or a service identifier outside the current ASCII grammar must be recreated with a concrete mint, a conforming service identifier and owner-approved installation; they fail closed under the current provider asset rule. Existing custody recovery follows its installed reader and owner withdrawal interface.
+
+Typed ingress is bounded before hashing: messages and response bodies are limited to 64 KiB, authenticated challenge bytes to 8 KiB, origins and paths to 4 KiB, and instruction/header collections to their declared limits. Oversized input fails with `WORKFLOW_INPUT_LIMIT`.
+
+The instruction ingress admits at most 16 instructions with individually bounded 64 KiB payloads. Hosts must provision memory for that aggregate and its typed JSON projection. Invalid empty or semantic instruction shapes also return `WORKFLOW_INPUT_LIMIT`; this code denotes rejected ingress shape as well as size.

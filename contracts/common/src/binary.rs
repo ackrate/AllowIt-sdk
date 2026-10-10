@@ -104,6 +104,8 @@ impl Encoder {
         }
         Ok(())
     }
+    // Reject host-only variants when SDK features unify in a native caller.
+    #[allow(unreachable_patterns)]
     fn statement(&mut self, value: &Statement) -> Result<(), Error> {
         match value {
             Statement::Let {
@@ -148,6 +150,7 @@ impl Encoder {
                 self.statements(else_branch)?;
                 self.span(span)?;
             }
+            _ => return Err(Error::InvalidArtifact),
         }
         Ok(())
     }
@@ -158,6 +161,8 @@ impl Encoder {
         }
         Ok(())
     }
+    // Reject host-only variants when SDK features unify in a native caller.
+    #[allow(unreachable_patterns)]
     fn expr(&mut self, value: &Expr) -> Result<(), Error> {
         match value {
             Expr::String { value } => {
@@ -210,6 +215,7 @@ impl Encoder {
                 self.byte(11);
                 self.expr(value)?;
             }
+            _ => return Err(Error::InvalidArtifact),
         }
         Ok(())
     }

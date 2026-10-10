@@ -1,0 +1,376 @@
+{
+  "statements": [
+    {
+      "else_branch": [
+        {
+          "kind": "return",
+          "span": {
+            "end": 1178,
+            "start": 1128
+          },
+          "value": {
+            "args": [
+              {
+                "kind": "string",
+                "value": "Native request is missing"
+              }
+            ],
+            "kind": "call",
+            "name": "fail",
+            "span": {
+              "end": 1148,
+              "start": 1135
+            }
+          }
+        }
+      ],
+      "kind": "if_some",
+      "name": "request",
+      "span": {
+        "end": 1180,
+        "start": 350
+      },
+      "then_branch": [
+        {
+          "annotation": null,
+          "kind": "let",
+          "name": "validated",
+          "span": {
+            "end": 468,
+            "start": 406
+          },
+          "value": {
+            "kind": "try",
+            "value": {
+              "args": [
+                {
+                  "kind": "variable",
+                  "name": "request"
+                }
+              ],
+              "kind": "call",
+              "name": "allowit::execution_request_validate",
+              "span": {
+                "end": 457,
+                "start": 422
+              }
+            }
+          }
+        },
+        {
+          "kind": "expression",
+          "semicolon": true,
+          "span": {
+            "end": 601,
+            "start": 477
+          },
+          "value": {
+            "kind": "try",
+            "value": {
+              "args": [
+                {
+                  "kind": "borrow",
+                  "value": {
+                    "kind": "variable",
+                    "name": "validated"
+                  }
+                },
+                {
+                  "kind": "string",
+                  "value": "native-budget"
+                },
+                {
+                  "kind": "string",
+                  "value": "native:solana:0909090909090909090909090909090909090909090909090909090909090909"
+                },
+                {
+                  "kind": "integer",
+                  "value": 9
+                },
+                {
+                  "kind": "integer",
+                  "value": 50000000
+                },
+                {
+                  "kind": "integer",
+                  "value": 10000000
+                },
+                {
+                  "kind": "integer",
+                  "value": 10000
+                }
+              ],
+              "kind": "call",
+              "name": "allowit::execution_request_cap",
+              "span": {
+                "end": 507,
+                "start": 477
+              }
+            }
+          }
+        },
+        {
+          "body": [
+            {
+              "condition": {
+                "kind": "binary",
+                "left": {
+                  "kind": "field",
+                  "name": "max_debit",
+                  "object": {
+                    "kind": "variable",
+                    "name": "effect"
+                  }
+                },
+                "op": ">",
+                "right": {
+                  "kind": "integer",
+                  "value": 10000000
+                }
+              },
+              "else_branch": [],
+              "kind": "if",
+              "span": {
+                "end": 758,
+                "start": 671
+              },
+              "then_branch": [
+                {
+                  "kind": "return",
+                  "span": {
+                    "end": 756,
+                    "start": 704
+                  },
+                  "value": {
+                    "args": [
+                      {
+                        "kind": "string",
+                        "value": "Debit exceeds owner ceiling"
+                      }
+                    ],
+                    "kind": "call",
+                    "name": "fail",
+                    "span": {
+                      "end": 724,
+                      "start": 711
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "condition": {
+                "kind": "binary",
+                "left": {
+                  "kind": "field",
+                  "name": "max_burn",
+                  "object": {
+                    "kind": "variable",
+                    "name": "effect"
+                  }
+                },
+                "op": ">",
+                "right": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              },
+              "else_branch": [],
+              "kind": "if",
+              "span": {
+                "end": 842,
+                "start": 771
+              },
+              "then_branch": [
+                {
+                  "kind": "return",
+                  "span": {
+                    "end": 840,
+                    "start": 796
+                  },
+                  "value": {
+                    "args": [
+                      {
+                        "kind": "string",
+                        "value": "Burn is not allowed"
+                      }
+                    ],
+                    "kind": "call",
+                    "name": "fail",
+                    "span": {
+                      "end": 816,
+                      "start": 803
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "kind": "for_each",
+          "name": "effect",
+          "span": {
+            "end": 852,
+            "start": 610
+          },
+          "values": {
+            "kind": "borrow",
+            "value": {
+              "kind": "field",
+              "name": "effect_bounds",
+              "object": {
+                "kind": "field",
+                "name": "request",
+                "object": {
+                  "kind": "variable",
+                  "name": "validated"
+                }
+              }
+            }
+          }
+        },
+        {
+          "else_branch": [
+            {
+              "kind": "return",
+              "span": {
+                "end": 1112,
+                "start": 1068
+              },
+              "value": {
+                "args": [
+                  {
+                    "kind": "string",
+                    "value": "Fees are unresolved"
+                  }
+                ],
+                "kind": "call",
+                "name": "fail",
+                "span": {
+                  "end": 1088,
+                  "start": 1075
+                }
+              }
+            }
+          ],
+          "kind": "if_some",
+          "name": "fees",
+          "span": {
+            "end": 1114,
+            "start": 861
+          },
+          "then_branch": [
+            {
+              "body": [
+                {
+                  "condition": {
+                    "kind": "binary",
+                    "left": {
+                      "kind": "field",
+                      "name": "max_fee",
+                      "object": {
+                        "kind": "variable",
+                        "name": "fee"
+                      }
+                    },
+                    "op": ">",
+                    "right": {
+                      "kind": "integer",
+                      "value": 10000
+                    }
+                  },
+                  "else_branch": [],
+                  "kind": "if",
+                  "span": {
+                    "end": 1036,
+                    "start": 959
+                  },
+                  "then_branch": [
+                    {
+                      "kind": "return",
+                      "span": {
+                        "end": 1034,
+                        "start": 984
+                      },
+                      "value": {
+                        "args": [
+                          {
+                            "kind": "string",
+                            "value": "Fee exceeds owner ceiling"
+                          }
+                        ],
+                        "kind": "call",
+                        "name": "fail",
+                        "span": {
+                          "end": 1004,
+                          "start": 991
+                        }
+                      }
+                    }
+                  ]
+                }
+              ],
+              "kind": "for_each",
+              "name": "fee",
+              "span": {
+                "end": 1050,
+                "start": 925
+              },
+              "values": {
+                "kind": "variable",
+                "name": "fees"
+              }
+            }
+          ],
+          "value": {
+            "kind": "borrow",
+            "value": {
+              "kind": "field",
+              "name": "fee_bounds",
+              "object": {
+                "kind": "field",
+                "name": "request",
+                "object": {
+                  "kind": "variable",
+                  "name": "validated"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "value": {
+        "kind": "borrow",
+        "value": {
+          "kind": "field",
+          "name": "execution_request",
+          "object": {
+            "kind": "variable",
+            "name": "ctx"
+          }
+        }
+      }
+    },
+    {
+      "kind": "expression",
+      "semicolon": false,
+      "span": {
+        "end": 1191,
+        "start": 1185
+      },
+      "value": {
+        "args": [
+          {
+            "kind": "unit"
+          }
+        ],
+        "kind": "call",
+        "name": "Ok",
+        "span": {
+          "end": 1187,
+          "start": 1185
+        }
+      }
+    }
+  ],
+  "version": "1.1.0"
+}

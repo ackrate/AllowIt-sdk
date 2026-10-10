@@ -3,14 +3,14 @@ import {readFile,writeFile,mkdir,lstat} from 'node:fs/promises';
 import {resolve,dirname} from 'node:path';
 import {Keypair,PublicKey} from '@solana/web3.js';
 import {NativePolicySDK,validatePolicy,decimal} from './index.mjs';
-import {FileJournal} from './journal.mjs';
+import {FileJournal,requireJournalPlatform} from './journal.mjs';
 import {PolicyLifecycle} from './lifecycle.mjs';
 const usage='allowit policy generate PROMPT | import EXECUTOR_JSON | deploy | fund AMOUNT | execute TOKEN_ACCOUNT AMOUNT | status | revoke | withdraw AMOUNT | tune AMOUNT';
 const args=process.argv.slice(2);let json=false;
 const clean=[];let literal=false;for(const arg of args){if(arg==='--'&&!literal){literal=true;continue;}if(arg==='--json'&&!literal){json=true;continue;}clean.push(arg);}const command=clean.shift();
 const stateDirectory=resolve(process.env.ALLOWIT_POLICY_DIR??'.allowit');
 const policyFile=resolve(process.env.ALLOWIT_POLICY_FILE??stateDirectory+'/policy.json');
-const journal=new FileJournal(stateDirectory+'/journal');
+let journal;
 let sdk;
 async function loadSigner(name){
  const path=process.env[name];if(!path)throw Error(`Configure ${name} with a dedicated test-network key file`);
@@ -21,6 +21,7 @@ async function loadSigner(name){
 async function savePolicy(policy){await mkdir(dirname(policyFile),{recursive:true,mode:0o700});try{await writeFile(policyFile,JSON.stringify(policy,null,2)+'\n',{mode:0o600,flag:'wx'});}catch(e){if(e.code==='EEXIST')throw Error('A policy already exists here. Choose a new ALLOWIT_POLICY_DIR; keep the previous policy and journal for recovery.');throw e;}}
 async function main(){
  if(!command||['help','--help'].includes(command)){console.log(usage);return;}
+ requireJournalPlatform();journal=new FileJournal(stateDirectory+'/journal');
  if(Number(process.versions.node.split('.')[0])<22)throw Error('Node >=22 is required');
  let context=null;try{context=JSON.parse(await readFile(stateDirectory+'/context.json','utf8'));}catch(e){if(e.code!=='ENOENT')throw Error('Unreadable policy context');}
 if(context){for(const [name,value]of [['ALLOWIT_NETWORK',context.network],['ALLOWIT_MINT',context.mint],['ALLOWIT_EXECUTOR',context.executor]])if(process.env[name]&&process.env[name]!==value)throw Error('Environment '+name+' differs from the imported policy context');}

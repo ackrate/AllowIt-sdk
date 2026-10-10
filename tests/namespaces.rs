@@ -232,8 +232,8 @@ fn runtime_artifacts_require_canonical_operation_names() {
 fn registry_minor_version_advertises_aliases_without_changing_ir_schema() {
     let source = source("set_cap(ctx, \"100\", \"USDC\")?; Ok(())");
     let mut policy = compile(&source).unwrap();
-    assert_eq!(allowit_sdk::REGISTRY_VERSION, "1.2.0");
-    assert_eq!(policy.registry_version, "1.2.0");
+    assert_eq!(allowit_sdk::REGISTRY_VERSION, "1.4.0");
+    assert_eq!(policy.registry_version, "1.4.0");
     assert_eq!(policy.ir.version, "1.0.0");
     let hash = policy.ir_hash.clone();
     policy.registry_version = "1.0.0".into();
@@ -242,7 +242,7 @@ fn registry_minor_version_advertises_aliases_without_changing_ir_schema() {
         "pass"
     );
     assert_eq!(allowit_sdk::canonical_ir_hash(&policy.ir).unwrap(), hash);
-    policy.registry_version = "1.3.0".into();
+    policy.registry_version = "1.5.0".into();
     assert_eq!(
         evaluate(&policy, Profile::Oracle, &context()).code,
         "INVALID_ARTIFACT"

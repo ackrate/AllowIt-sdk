@@ -40,7 +40,7 @@ pub fn process_value(request: Value) -> Value {
         );
     }
     if operation == "registry" {
-        return json!({"ok":true,"language":crate::LANGUAGE,"registry_version":crate::REGISTRY_VERSION,"functions":crate::registry()});
+        return json!({"ok":true,"language":crate::LANGUAGE,"registry_version":crate::REGISTRY_VERSION,"functions":crate::registry(),"type_declarations":crate::typed_workflow::type_declarations()});
     }
     #[cfg(feature = "compiler")]
     {
@@ -118,6 +118,16 @@ pub fn process_value(request: Value) -> Value {
             }
             Some(_) => return failure("INVALID_REQUEST", "trace must be a boolean."),
         };
+        if request
+            .get("context")
+            .and_then(|v| v.get("provider_call_input"))
+            .is_some()
+        {
+            return failure(
+                "INVALID_CONTEXT",
+                "Request JSON cannot supply authenticated provider input. Use the trusted typed adapter.",
+            );
+        }
         if request
             .get("context")
             .and_then(|v| v.get("native_policy_storage"))

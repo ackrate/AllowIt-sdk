@@ -21,14 +21,27 @@ enum Value {
     Context,
     Interval(ConfidenceInterval),
     Strings(Vec<String>),
+    #[cfg(feature = "typed-workflow")]
+    Workflow {
+        ty: crate::typed_workflow::WorkflowType,
+        data: serde_json::Value,
+    },
 }
 type EvalResult = Result<Value, alloc::boxed::Box<Decision>>;
 
 struct Evaluator<'a> {
+    #[cfg(feature = "typed-workflow")]
+    typed_profile: bool,
     context: &'a Context,
     profile: Profile,
     binding: String,
     steps: usize,
+    #[cfg(feature = "typed-workflow")]
+    system_operations: Vec<crate::ProviderCallPlan>,
+    #[cfg(feature = "typed-workflow")]
+    workflow_outputs: Vec<crate::typed_workflow::WorkflowOutput>,
+    #[cfg(feature = "typed-workflow")]
+    budget_guards: Vec<crate::typed_workflow::TypedBudgetRequirement>,
     #[cfg(feature = "compiler")]
     trace: Option<&'a mut crate::trace::TraceRecorder>,
     #[cfg(feature = "compiler")]
@@ -65,6 +78,61 @@ impl Evaluator<'_> {
                         Statement::Return { value, .. } => {
                             self.expr(value, env)?;
                             return Ok(true);
+                        }
+                        #[cfg(feature = "typed-workflow")]
+                        Statement::ForEach {
+                            name, values, body, ..
+                        } => {
+                            let Value::Workflow {
+                                ty: crate::typed_workflow::WorkflowType::Vec(inner),
+                                data,
+                            } = self.expr(values, env)?
+                            else {
+                                return Err(invalid());
+                            };
+                            let values = data.as_array().ok_or_else(invalid)?;
+                            if values.len() > 64 {
+                                return Err(failure(
+                                    "WORKFLOW_LIMIT",
+                                    "Typed collections contain at most 64 entries.",
+                                ));
+                            }
+                            for item in values {
+                                let mut branch = env.clone();
+                                branch.insert(
+                                    name.clone(),
+                                    workflow_value((*inner).clone(), item.clone())?,
+                                );
+                                if self.block(body, &mut branch)? {
+                                    return Err(invalid());
+                                }
+                            }
+                        }
+                        #[cfg(feature = "typed-workflow")]
+                        Statement::IfSome {
+                            name,
+                            value,
+                            then_branch,
+                            else_branch,
+                            ..
+                        } => {
+                            let Value::Workflow {
+                                ty: crate::typed_workflow::WorkflowType::Option(inner),
+                                data,
+                            } = self.expr(value, env)?
+                            else {
+                                return Err(invalid());
+                            };
+                            let mut branch = env.clone();
+                            let some = !data.is_null();
+                            if some {
+                                branch.insert(name.clone(), workflow_value(*inner, data)?);
+                            }
+                            if self
+                                .block(if some { then_branch } else { else_branch }, &mut branch)?
+                            {
+                                return Ok(true);
+                            }
                         }
                         Statement::If {
                             condition,
@@ -152,9 +220,37 @@ impl Evaluator<'_> {
                             storage.action_limit_units
                         })
                     }
+                    #[cfg(feature = "typed-workflow")]
+                    "execution_request" | "curl_request" | "curl_outcome" => {
+                        let input = self.context.workflow.as_ref().ok_or_else(|| {
+                            failure(
+                                "WORKFLOW_INPUT_REQUIRED",
+                                "Authenticated typed workflow input is required.",
+                            )
+                        })?;
+                        match name.as_str() {
+                            "execution_request" => {
+                                optional_value("ExecutionRequest", &input.execution_request)?
+                            }
+                            "curl_request" => optional_value("CurlRequest", &input.curl_request)?,
+                            _ => optional_value("CurlOutcome", &input.curl_outcome)?,
+                        }
+                    }
                     "amount_units" => Value::Integer(self.context.amount_units),
                     "allocation_units" => Value::Integer(self.context.allocation_units),
                     "spent_units" => Value::Integer(self.context.spent_units),
+                    #[cfg(feature = "typed-workflow")]
+                    "now" => Value::Integer(if self.typed_profile {
+                        self.context
+                            .workflow
+                            .as_ref()
+                            .map_or(self.context.now, |environment| {
+                                environment.evaluated_at_seconds
+                            })
+                    } else {
+                        self.context.now
+                    }),
+                    #[cfg(not(feature = "typed-workflow"))]
                     "now" => Value::Integer(self.context.now),
                     "action" => Value::String(self.context.action.clone()),
                     "merchant" => Value::String(self.context.merchant.clone()),
@@ -163,6 +259,16 @@ impl Evaluator<'_> {
                     "network" => Value::String(self.context.network.clone()),
                     _ => return Err(invalid()),
                 },
+                #[cfg(feature = "typed-workflow")]
+                Value::Workflow {
+                    ty: crate::typed_workflow::WorkflowType::Named(ty),
+                    data,
+                } => {
+                    let field_type =
+                        crate::typed_workflow::field_type(&ty, name).ok_or_else(invalid)?;
+                    let field = data.get(name).ok_or_else(invalid)?.clone();
+                    workflow_value(field_type, field)?
+                }
                 Value::Interval(interval) => match name.as_str() {
                     "lower_bps" => Value::Integer(interval.lower_bps),
                     "upper_bps" => Value::Integer(interval.upper_bps),
@@ -183,6 +289,8 @@ impl Evaluator<'_> {
                 Value::Boolean(v) => Value::Boolean(!v),
                 _ => return Err(invalid()),
             },
+            #[cfg(feature = "typed-workflow")]
+            Expr::Borrow { value } => self.expr(value, env)?,
             Expr::Try { value } | Expr::Await { value } => self.expr(value, env)?,
             Expr::Binary { op, left, right } => {
                 let a = self.expr(left, env)?;
@@ -193,6 +301,31 @@ impl Evaluator<'_> {
                     return Ok(Value::Boolean(true));
                 }
                 let b = self.expr(right, env)?;
+                #[cfg(feature = "typed-workflow")]
+                if (matches!(
+                    &a,
+                    Value::Workflow {
+                        ty: crate::typed_workflow::WorkflowType::Amount256,
+                        ..
+                    }
+                ) || matches!(
+                    &b,
+                    Value::Workflow {
+                        ty: crate::typed_workflow::WorkflowType::Amount256,
+                        ..
+                    }
+                )) && let (Some(a), Some(b)) = (amount_value(&a), amount_value(&b))
+                {
+                    return Ok(Value::Boolean(match op.as_str() {
+                        "==" => a == b,
+                        "!=" => a != b,
+                        ">" => a > b,
+                        ">=" => a >= b,
+                        "<" => a < b,
+                        "<=" => a <= b,
+                        _ => return Err(invalid()),
+                    }));
+                }
                 match op.as_str() {
                     "==" => Value::Boolean(a == b),
                     "!=" => Value::Boolean(a != b),
@@ -206,10 +339,28 @@ impl Evaluator<'_> {
                         let (Value::Integer(a), Value::Integer(b)) = (a, b) else {
                             return Err(invalid());
                         };
-                        match op.as_str(){
-                            ">"=>Value::Boolean(a>b),">="=>Value::Boolean(a>=b),"<"=>Value::Boolean(a<b),"<="=>Value::Boolean(a<=b),
-                            "+"|"-"|"*"|"/"|"%"=>Value::Integer(match op.as_str(){"+"=>a.checked_add(b),"-"=>a.checked_sub(b),"*"=>a.checked_mul(b),"/"=>a.checked_div(b),"%"=>a.checked_rem(b),_=>None}.ok_or_else(||failure("ARITHMETIC_ERROR","A policy calculation overflowed, underflowed or divided by zero."))?),
-                            _=>return Err(invalid()),
+                        match op.as_str() {
+                            ">" => Value::Boolean(a > b),
+                            ">=" => Value::Boolean(a >= b),
+                            "<" => Value::Boolean(a < b),
+                            "<=" => Value::Boolean(a <= b),
+                            "+" | "-" | "*" | "/" | "%" => Value::Integer(
+                                match op.as_str() {
+                                    "+" => a.checked_add(b),
+                                    "-" => a.checked_sub(b),
+                                    "*" => a.checked_mul(b),
+                                    "/" => a.checked_div(b),
+                                    "%" => a.checked_rem(b),
+                                    _ => None,
+                                }
+                                .ok_or_else(|| {
+                                    failure(
+                                        "ARITHMETIC_ERROR",
+                                        "Calculation overflowed, underflowed or divided by zero.",
+                                    )
+                                })?,
+                            ),
+                            _ => return Err(invalid()),
                         }
                     }
                 }
@@ -220,6 +371,337 @@ impl Evaluator<'_> {
                     .map(|a| self.expr(a, env))
                     .collect::<Result<Vec<_>, _>>()?;
                 match name.as_str() {
+                    #[cfg(feature = "typed-workflow")]
+                    "allowit::execution_request_validate" => {
+                        let [
+                            Value::Workflow {
+                                ty: crate::typed_workflow::WorkflowType::Named(ty),
+                                data,
+                            },
+                        ] = values.as_slice()
+                        else {
+                            return Err(invalid());
+                        };
+                        let environment = self.context.workflow.as_ref().ok_or_else(invalid)?;
+                        let request = environment.execution_request.as_ref().ok_or_else(invalid)?;
+                        if ty != "ExecutionRequest"
+                            || *data != serde_json::to_value(request).map_err(|_| invalid())?
+                            || !crate::typed_workflow::execution_shape(request)
+                            || request.operation != environment.binding.operation
+                        {
+                            return Err(failure(
+                                "WORKFLOW_BINDING",
+                                "Execution input does not match the authenticated complete request.",
+                            ));
+                        }
+                        let result = environment
+                            .host
+                            .execution_request_validate(request, &environment.binding)
+                            .map_err(|e| failure(&e.code, e.reason))?;
+                        if !self.workflow_outputs.is_empty()
+                            || !crate::typed_workflow::native_transfers_covered(
+                                request,
+                                &environment.binding.domain,
+                            )
+                            || request.effect_bounds.iter().any(|effect| {
+                                !crate::typed_workflow::asset_in_domain(
+                                    &effect.asset,
+                                    &environment.binding.domain,
+                                ) || !crate::typed_workflow::debit_authorized(
+                                    &effect.source,
+                                    &effect.asset,
+                                    environment,
+                                ) || effect.beneficiary.chain != environment.binding.domain.chain
+                            })
+                            || request.fee_bounds.as_ref().is_some_and(|fees| {
+                                fees.iter().any(|fee| {
+                                    !crate::typed_workflow::asset_in_domain(
+                                        &fee.asset,
+                                        &environment.binding.domain,
+                                    ) || fee.payer.chain != environment.binding.domain.chain
+                                })
+                            })
+                            || result.request != *request
+                            || result.binding != environment.binding
+                            || result.request_digest != environment.binding.request_digest
+                            || result.profile_digest != environment.binding.profile_digest
+                            || result.domain != environment.binding.domain
+                            || result.signing_digest == [0; 32]
+                            || matches!(&request.input,crate::typed_workflow::ExecutionInput::Instructions(v) if *v!=result.instructions)
+                            || result.instructions.iter().any(|i| {
+                                !crate::typed_workflow::instruction_shape(i)
+                                    || !crate::typed_workflow::instruction_in_domain(
+                                        i,
+                                        &environment.binding.domain,
+                                    )
+                            })
+                            || !crate::typed_workflow::native_transfers_covered(
+                                &crate::typed_workflow::ExecutionRequest {
+                                    input: crate::typed_workflow::ExecutionInput::Instructions(
+                                        result.instructions.clone(),
+                                    ),
+                                    ..request.clone()
+                                },
+                                &environment.binding.domain,
+                            )
+                            || result.instructions.is_empty()
+                            || result.instructions.len() > 16
+                            || result.modules.is_empty()
+                            || result.modules.len() > 16
+                        {
+                            return Err(failure(
+                                "WORKFLOW_BINDING",
+                                "Validated request does not match the installed binding.",
+                            ));
+                        }
+                        let value = typed_value("ValidatedExecutionRequest", &result)?;
+                        self.workflow_outputs
+                            .push(crate::typed_workflow::WorkflowOutput::Execution(result));
+                        value
+                    }
+                    #[cfg(feature = "typed-workflow")]
+                    "paysh::payment_request_from_curl" => {
+                        let [
+                            Value::Workflow {
+                                ty: crate::typed_workflow::WorkflowType::Named(a),
+                                data: outcome,
+                            },
+                            Value::Workflow {
+                                ty: crate::typed_workflow::WorkflowType::Named(b),
+                                data: request,
+                            },
+                        ] = values.as_slice()
+                        else {
+                            return Err(invalid());
+                        };
+                        let environment = self.context.workflow.as_ref().ok_or_else(invalid)?;
+                        let original = environment.curl_request.as_ref().ok_or_else(invalid)?;
+                        let response = environment.curl_outcome.as_ref().ok_or_else(invalid)?;
+                        if a != "CurlOutcome"
+                            || b != "CurlRequest"
+                            || *outcome != serde_json::to_value(response).map_err(|_| invalid())?
+                            || *request != serde_json::to_value(original).map_err(|_| invalid())?
+                            || !crate::typed_workflow::curl_shape(original)
+                        {
+                            return Err(failure(
+                                "WORKFLOW_BINDING",
+                                "HTTP request/outcome does not match authenticated preflight.",
+                            ));
+                        }
+                        let result = environment
+                            .host
+                            .payment_request_from_curl(response, original, &environment.binding)
+                            .map_err(|e| failure(&e.code, e.reason))?;
+                        match &result {
+                            Some(payment) => {
+                                let crate::typed_workflow::CurlOutcome::PaymentRequired(challenge) =
+                                    response
+                                else {
+                                    return Err(invalid());
+                                };
+                                if !self.workflow_outputs.is_empty()
+                                    || !crate::typed_workflow::asset_in_domain(
+                                        &payment.payment.asset,
+                                        &environment.binding.domain,
+                                    )
+                                    || !crate::typed_workflow::debit_authorized(
+                                        &payment.payer,
+                                        &payment.payment.asset,
+                                        environment,
+                                    )
+                                    || payment.payee.chain != environment.binding.domain.chain
+                                    || payment.fee_payer.chain != environment.binding.domain.chain
+                                    || payment.fee_bounds.as_ref().is_some_and(|fees| {
+                                        fees.iter().any(|fee| {
+                                            !crate::typed_workflow::asset_in_domain(
+                                                &fee.asset,
+                                                &environment.binding.domain,
+                                            ) || fee.payer.chain != environment.binding.domain.chain
+                                        })
+                                    })
+                                    || payment.binding != environment.binding
+                                    || payment.operation != environment.binding.operation
+                                    || payment.profile_digest != environment.binding.profile_digest
+                                    || payment.http_request_digest != challenge.http_request_digest
+                                    || challenge.network != environment.binding.domain.network
+                                    || payment.scheme != challenge.scheme
+                                    || payment.payee != challenge.payee
+                                    || payment.fee_payer != challenge.fee_payer
+                                    || payment.payment.asset
+                                        != crate::typed_workflow::WorkflowAsset::Token(
+                                            challenge.asset.clone(),
+                                        )
+                                    || payment.payment.units != challenge.amount
+                                    || payment.expires_at_seconds != challenge.expires_at_seconds
+                                    || payment.expires_at_seconds
+                                        <= environment.evaluated_at_seconds
+                                    || payment.response_access_key != challenge.response_access_key
+                                    || challenge.amount == crate::typed_workflow::Amount256::from(0)
+                                    || payment.evidence.kind
+                                        != crate::typed_workflow::EvidenceKind::PaymentChallenge
+                                    || payment.evidence.schema == 0
+                                    || payment.evidence.namespace_id == 0
+                                    || payment.evidence.digest != challenge.challenge_digest
+                                    || payment.fee_bounds.as_ref().is_some_and(|v| v.len() > 16)
+                                    || challenge.authenticated_wire_bytes.is_empty()
+                                {
+                                    return Err(failure(
+                                        "WORKFLOW_BINDING",
+                                        "Payment proposal does not match the authenticated challenge.",
+                                    ));
+                                }
+                                self.workflow_outputs.push(
+                                    crate::typed_workflow::WorkflowOutput::Payment(payment.clone()),
+                                );
+                            }
+                            None => {
+                                let crate::typed_workflow::CurlOutcome::Complete(response) =
+                                    response
+                                else {
+                                    return Err(failure(
+                                        "WORKFLOW_BINDING",
+                                        "A payment challenge cannot become a free response.",
+                                    ));
+                                };
+                                if !(200..300).contains(&response.status)
+                                    || response.receipt_digest == [0; 32]
+                                {
+                                    return Err(failure(
+                                        "WORKFLOW_BINDING",
+                                        "Only a valid bound free response produces None.",
+                                    ));
+                                }
+                                self.workflow_outputs.push(
+                                    crate::typed_workflow::WorkflowOutput::FreeResponse {
+                                        request_digest: environment.binding.request_digest,
+                                        receipt_digest: response.receipt_digest,
+                                    },
+                                );
+                            }
+                        }
+                        workflow_value(
+                            crate::typed_workflow::WorkflowType::Option(alloc::boxed::Box::new(
+                                crate::typed_workflow::WorkflowType::named("PaymentRequest"),
+                            )),
+                            serde_json::to_value(result).map_err(|_| invalid())?,
+                        )?
+                    }
+                    #[cfg(feature = "typed-workflow")]
+                    "allowit::execution_request_cap" | "allowit::payment_request_cap" => {
+                        let [
+                            Value::Workflow {
+                                ty: crate::typed_workflow::WorkflowType::Named(ty),
+                                data,
+                            },
+                            Value::String(budget_id),
+                            Value::String(asset_id),
+                            Value::Integer(decimals),
+                            Value::Integer(total),
+                            Value::Integer(debit),
+                            Value::Integer(fee),
+                        ] = values.as_slice()
+                        else {
+                            return Err(invalid());
+                        };
+                        let matching = self.workflow_outputs.iter().any(|o| match o {
+                            crate::typed_workflow::WorkflowOutput::Execution(v) => {
+                                name == "allowit::execution_request_cap"
+                                    && ty == "ValidatedExecutionRequest"
+                                    && serde_json::to_value(v).ok().as_ref() == Some(data)
+                            }
+                            crate::typed_workflow::WorkflowOutput::Payment(v) => {
+                                name == "allowit::payment_request_cap"
+                                    && ty == "PaymentRequest"
+                                    && serde_json::to_value(v).ok().as_ref() == Some(data)
+                            }
+                            _ => false,
+                        });
+                        if !matching {
+                            return Err(failure(
+                                "WORKFLOW_BINDING",
+                                "Budget guards require an actual authenticated node result.",
+                            ));
+                        }
+                        let guard = crate::typed_workflow::TypedBudgetRequirement {
+                            operation: name.clone(),
+                            budget_id: budget_id.clone(),
+                            asset_id: asset_id.clone(),
+                            decimals: *decimals as u8,
+                            total_budget_units: *total,
+                            max_debit_units: *debit,
+                            max_fee_units: *fee,
+                        };
+                        self.budget_guards.push(guard);
+                        Value::Unit
+                    }
+                    #[cfg(feature = "typed-workflow")]
+                    "paysh::call" => {
+                        if self.profile != Profile::Oracle {
+                            return Err(failure(
+                                "PROVIDER_PROFILE_UNSUPPORTED",
+                                "Provider effects require an authenticated host adapter.",
+                            ));
+                        }
+                        if !self.system_operations.is_empty() {
+                            return Err(failure(
+                                "PROVIDER_CALL_LIMIT",
+                                "Only one provider call is supported per run.",
+                            ));
+                        }
+                        let service_id = string(&values, 0)?;
+                        let input_key = string(&values, 1)?;
+                        let binding =
+                            self.context.provider_call_input.as_ref().ok_or_else(|| {
+                                failure(
+                                    "PROVIDER_INPUT_REQUIRED",
+                                    "Authenticated provider input is required.",
+                                )
+                            })?;
+                        if service_id.is_empty()
+                            || service_id.len() > 200
+                            || input_key.is_empty()
+                            || input_key.len() > 200
+                            || service_id != binding.service_id
+                            || input_key != binding.input_key
+                            || binding.request_digest.len() != 64
+                            || !binding
+                                .request_digest
+                                .bytes()
+                                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                        {
+                            return Err(failure(
+                                "PROVIDER_INPUT_MISMATCH",
+                                "The operation does not match authenticated canonical run input.",
+                            ));
+                        }
+                        let max_payment_units = integer(&values, 2)?;
+                        let max_swap_lamports = integer(&values, 3)?;
+                        let max_service_fee_lamports_per_execution = integer(&values, 4)?;
+                        if self.context.amount_units > max_payment_units {
+                            return Err(failure(
+                                "PROVIDER_PAYMENT_UNBOUND",
+                                "The exact guarded payment exceeds the source payment ceiling.",
+                            ));
+                        }
+                        if self.context.amount_units == 0 || max_payment_units == 0 {
+                            return Err(failure(
+                                "PROVIDER_INVALID_PAYMENT",
+                                "A paid call requires a positive payment ceiling.",
+                            ));
+                        }
+                        self.system_operations.push(crate::ProviderCallPlan {
+                            payment_asset: binding.payment_asset.clone(),
+                            operation: "paysh::call".into(),
+                            service_id,
+                            input_key,
+                            request_digest: binding.request_digest.clone(),
+                            payment_units: self.context.amount_units,
+                            max_payment_units,
+                            max_swap_lamports,
+                            max_service_fee_lamports_per_execution,
+                        });
+                        Value::Boolean(true)
+                    }
                     "Ok" => Value::Unit,
                     "fail" => return Err(failure("POLICY_REJECTED", string(&values, 0)?)),
                     #[cfg(not(feature = "oracle-ledger"))]
@@ -238,7 +720,7 @@ impl Evaluator<'_> {
                             ));
                         }
                         let token = string(&values, 3)?;
-                        if token != "USDC" || token != self.context.token {
+                        if token != self.context.token {
                             return Err(failure("TOKEN_MISMATCH", "Token does not match."));
                         }
                         let maximum = amount_units(&string(&values, 1)?)
@@ -252,7 +734,7 @@ impl Evaluator<'_> {
                     }
                     "set_cap" | "cap_per_transaction" => {
                         let token = string(&values, 2)?;
-                        if token != "USDC" || token != self.context.token {
+                        if token != self.context.token {
                             return Err(failure(
                                 "TOKEN_MISMATCH",
                                 "The requested token does not match the policy.",
@@ -348,13 +830,21 @@ impl Evaluator<'_> {
                         if is_semantic && self.context.original_intent.trim().is_empty() {
                             return Err(failure(
                                 "ORIGINAL_INTENT_REQUIRED",
-                                "The original policy instructions are required for a preference assessment.",
+                                "Preference assessment requires original policy instructions.",
                             ));
                         }
                         let key = if is_semantic {
                             crate::semantic_evidence_key(&label)
                         } else {
                             label.clone()
+                        };
+                        #[cfg(feature = "typed-workflow")]
+                        let key = if self.typed_profile
+                            && let Some(environment) = &self.context.workflow
+                        {
+                            crate::typed_workflow::evidence_key(&environment.binding, &label)
+                        } else {
+                            key
                         };
                         let interval = self.context.confidence.get(&key).ok_or_else(|| {
                             let mut decision = failure(
@@ -404,6 +894,18 @@ impl Evaluator<'_> {
                             )
                             .as_bytes(),
                         );
+                        #[cfg(feature = "typed-workflow")]
+                        let key = if self.typed_profile
+                            && let Some(environment) = &self.context.workflow
+                        {
+                            crate::typed_workflow::input_key(
+                                &environment.binding,
+                                span.start,
+                                &prompt,
+                            )
+                        } else {
+                            key
+                        };
                         match self.context.answers.get(&key) {
                             Some(true) => Value::Unit,
                             Some(false) => {
@@ -414,6 +916,12 @@ impl Evaluator<'_> {
                             }
                             None => {
                                 return Err(alloc::boxed::Box::new(Decision {
+                                    #[cfg(feature = "typed-workflow")]
+                                    system_operations: Vec::new(),
+                                    #[cfg(feature = "typed-workflow")]
+                                    workflow_outputs: Vec::new(),
+                                    #[cfg(feature = "typed-workflow")]
+                                    typed_budget_plans: Vec::new(),
                                     outcome: "awaiting_input".into(),
                                     code: "USER_INPUT_REQUIRED".into(),
                                     reason:
@@ -441,6 +949,13 @@ fn string(values: &[Value], index: usize) -> Result<String, alloc::boxed::Box<De
         _ => Err(invalid()),
     }
 }
+#[cfg(feature = "typed-workflow")]
+fn integer(values: &[Value], index: usize) -> Result<u64, alloc::boxed::Box<Decision>> {
+    match values.get(index) {
+        Some(Value::Integer(value)) => Ok(*value),
+        _ => Err(invalid()),
+    }
+}
 fn invalid() -> alloc::boxed::Box<Decision> {
     failure(
         "INVALID_POLICY",
@@ -448,7 +963,39 @@ fn invalid() -> alloc::boxed::Box<Decision> {
     )
 }
 
-fn validate_context(ctx: &Context) -> Result<(), alloc::boxed::Box<Decision>> {
+fn validate_context(
+    ctx: &Context,
+    provider_profile: bool,
+) -> Result<(), alloc::boxed::Box<Decision>> {
+    #[cfg(not(feature = "typed-workflow"))]
+    let _ = provider_profile;
+    #[cfg(feature = "typed-workflow")]
+    if provider_profile {
+        let binding = ctx.provider_call_input.as_ref().ok_or_else(|| {
+            failure(
+                "PROVIDER_INPUT_REQUIRED",
+                "Authenticated provider input is required.",
+            )
+        })?;
+        let asset = &binding.payment_asset;
+        if asset.asset.is_empty()
+            || asset.asset.len() > 128
+            || asset.network != ctx.network
+            || asset.decimals != 6
+            || ctx.token != asset.asset
+        {
+            return Err(failure(
+                "PROVIDER_ASSET_MISMATCH",
+                "Context must match the authenticated six-decimal native payment asset.",
+            ));
+        }
+    } else if ctx.token != "USDC" {
+        return Err(failure(
+            "TOKEN_MISMATCH",
+            "This policy supports six-decimal USDC.",
+        ));
+    }
+    #[cfg(not(feature = "typed-workflow"))]
     if ctx.token != "USDC" {
         return Err(failure(
             "TOKEN_MISMATCH",
@@ -498,13 +1045,13 @@ fn validate_context(ctx: &Context) -> Result<(), alloc::boxed::Box<Decision>> {
         || ctx.recipient.len() > 256
         || ctx.answers.len() > 32
         || ctx.confidence.len() > 32
-        || ctx.answers.keys().any(|s| s.len() != 64)
         || ctx.confidence.keys().any(|s| s.is_empty() || s.len() > 128)
+        || ctx.answers.keys().any(|s| s.len() != 64)
         || ctx.original_intent.len() > 16384
     {
         return Err(failure(
             "INVALID_CONTEXT",
-            "The request context is missing required values or exceeds its size limit.",
+            "Request context lacks required values or exceeds its size limit.",
         ));
     }
     validate_runtime_context(&ctx.runtime_context)?;
@@ -526,7 +1073,7 @@ fn validate_runtime_context(value: &serde_json::Value) -> Result<(), alloc::boxe
     let invalid = || {
         failure(
             "INVALID_CONTEXT",
-            "Runtime context must be an object of at most 16 KiB, depth 8 and 128 entries.",
+            "Runtime context requires an object: at most 16 KiB, depth 8 and 128 entries.",
         )
     };
     if !value.is_object() {
@@ -592,6 +1139,80 @@ fn run_inner(
     if let Err(error) = validate_program(ir) {
         return Decision::fail("INVALID_POLICY", error.message);
     }
+    #[cfg(feature = "typed-workflow")]
+    if crate::typed_workflow::required(ir) {
+        if profile != Profile::Oracle {
+            return Decision::fail(
+                "WORKFLOW_PROFILE_UNSUPPORTED",
+                "Typed host workflow nodes require the Oracle profile.",
+            );
+        }
+        let Some(environment) = ctx.workflow.as_ref() else {
+            return Decision::fail(
+                "WORKFLOW_INPUT_REQUIRED",
+                "Authenticated typed workflow input is required.",
+            );
+        };
+        if environment.evaluated_at_seconds == 0
+            || !matches!(
+                (
+                    &environment.execution_request,
+                    &environment.curl_request,
+                    &environment.curl_outcome
+                ),
+                (Some(_), None, None) | (None, Some(_), Some(_))
+            )
+        {
+            return Decision::fail(
+                "WORKFLOW_BINDING",
+                "One authenticated ingress family and trusted nonzero evaluation time are required.",
+            );
+        }
+        if environment
+            .execution_request
+            .as_ref()
+            .is_some_and(|r| !crate::typed_workflow::execution_shape(r))
+            || environment
+                .curl_request
+                .as_ref()
+                .is_some_and(|r| !crate::typed_workflow::curl_input_size(r))
+            || environment
+                .curl_outcome
+                .as_ref()
+                .is_some_and(|r| !crate::typed_workflow::curl_outcome_shape(r))
+        {
+            return Decision::fail(
+                "WORKFLOW_INPUT_LIMIT",
+                "Typed ingress exceeds its bounded shape.",
+            );
+        }
+        if crate::typed_workflow::request_digest(
+            &environment.binding,
+            &environment.execution_request,
+            &environment.curl_request,
+            &environment.curl_outcome,
+        )
+        .ok()
+            != Some(environment.binding.request_digest)
+            || !crate::typed_workflow::binding_valid(&environment.binding)
+            || crate::typed_workflow::hex(&environment.binding.source_hash) != binding
+                && crate::typed_workflow::hex(&environment.binding.ir_hash) != binding
+            || canonical_ir_hash(ir).ok().as_deref()
+                != Some(crate::typed_workflow::hex(&environment.binding.ir_hash).as_str())
+        {
+            return Decision::fail(
+                "WORKFLOW_BINDING",
+                "Typed inputs must bind the exact source and IR.",
+            );
+        }
+    }
+    #[cfg(feature = "typed-workflow")]
+    if profile == Profile::Contract && crate::validation::provider_call_required(ir) {
+        return Decision::fail(
+            "PROVIDER_PROFILE_UNSUPPORTED",
+            "This contract profile cannot execute provider operations; use the authenticated host settlement adapter.",
+        );
+    }
     #[cfg(feature = "std")]
     if crate::validation::native_storage_required(ir) {
         if profile == Profile::Contract {
@@ -613,7 +1234,24 @@ fn run_inner(
             );
         }
     }
-    if let Err(error) = validate_context(ctx) {
+    let typed_only = cfg!(feature = "typed-workflow")
+        && crate::typed_workflow::required(ir)
+        && !crate::validation::provider_call_required(ir);
+    if let Err(error) = if typed_only {
+        #[cfg(feature = "typed-workflow")]
+        {
+            validate_workflow_context(ctx)
+        }
+        #[cfg(not(feature = "typed-workflow"))]
+        {
+            Err(invalid())
+        }
+    } else {
+        validate_context(
+            ctx,
+            cfg!(feature = "typed-workflow") && crate::validation::provider_call_required(ir),
+        )
+    } {
         return *error;
     }
     if profile == Profile::Contract && ctx.network == "local:dev" {
@@ -623,10 +1261,18 @@ fn run_inner(
         );
     }
     let mut evaluator = Evaluator {
+        #[cfg(feature = "typed-workflow")]
+        typed_profile: cfg!(feature = "typed-workflow") && crate::typed_workflow::required(ir),
         context: ctx,
         profile,
         binding,
         steps: 0,
+        #[cfg(feature = "typed-workflow")]
+        budget_guards: Vec::new(),
+        #[cfg(feature = "typed-workflow")]
+        workflow_outputs: Vec::new(),
+        #[cfg(feature = "typed-workflow")]
+        system_operations: Vec::new(),
         #[cfg(feature = "compiler")]
         trace,
         #[cfg(feature = "compiler")]
@@ -653,7 +1299,106 @@ fn run_inner(
         }
     }
     match evaluator.block(&ir.statements, &mut env) {
-        Ok(true) => Decision::pass(),
+        Ok(true) => {
+            #[cfg(feature = "typed-workflow")]
+            {
+                if crate::typed_workflow::required(ir) && evaluator.workflow_outputs.len() != 1 {
+                    return Decision::fail(
+                        "WORKFLOW_PROPOSAL_REQUIRED",
+                        "One validated proposal or authenticated free response is required.",
+                    );
+                }
+                if evaluator
+                    .workflow_outputs
+                    .iter()
+                    .any(|output| match output {
+                        crate::typed_workflow::WorkflowOutput::Execution(r) => {
+                            r.request.fee_bounds.is_none()
+                        }
+                        crate::typed_workflow::WorkflowOutput::Payment(r) => r.fee_bounds.is_none(),
+                        _ => false,
+                    })
+                {
+                    return Decision::fail(
+                        "WORKFLOW_FEES_UNRESOLVED",
+                        "Final authorization requires explicit authenticated fee bounds.",
+                    );
+                }
+                if evaluator
+                    .workflow_outputs
+                    .iter()
+                    .any(|output| match output {
+                        crate::typed_workflow::WorkflowOutput::Execution(r) => {
+                            r.request.fee_bounds.as_ref().is_some_and(|fees| {
+                                crate::typed_workflow::requires_zero_fee_proof(
+                                    fees,
+                                    crate::typed_workflow::authority_source(&r.domain),
+                                    &r.domain,
+                                )
+                            })
+                        }
+                        crate::typed_workflow::WorkflowOutput::Payment(r) => {
+                            r.fee_bounds.as_ref().is_some_and(|fees| {
+                                crate::typed_workflow::requires_zero_fee_proof(
+                                    fees,
+                                    &r.fee_payer,
+                                    &r.binding.domain,
+                                )
+                            })
+                        }
+                        _ => false,
+                    })
+                {
+                    let Some(environment) = ctx.workflow.as_ref() else {
+                        return *invalid();
+                    };
+                    if environment
+                        .host
+                        .zero_fee_evidence(&environment.binding)
+                        .is_none_or(|proof| {
+                            proof.binding != environment.binding
+                                || proof.evidence.digest == [0; 32]
+                                || proof.evidence.schema == 0
+                                || proof.evidence.namespace_id == 0
+                                || proof.evidence.kind
+                                    != crate::typed_workflow::EvidenceKind::ExternalClaim
+                        })
+                    {
+                        return Decision::fail(
+                            "WORKFLOW_ZERO_FEE_EVIDENCE_REQUIRED",
+                            "An empty fee list needs authenticated proof of no extra charge.",
+                        );
+                    }
+                }
+            }
+            #[cfg(feature = "typed-workflow")]
+            let mut decision = Decision::pass();
+            #[cfg(not(feature = "typed-workflow"))]
+            let decision = Decision::pass();
+            #[cfg(feature = "typed-workflow")]
+            {
+                decision.system_operations = evaluator.system_operations;
+            }
+            #[cfg(feature = "typed-workflow")]
+            if !evaluator.workflow_outputs.is_empty() {
+                let Some(environment) = ctx.workflow.as_ref() else {
+                    return *invalid();
+                };
+                decision.typed_budget_plans = match typed_budget_plans(
+                    &evaluator.workflow_outputs,
+                    &evaluator.budget_guards,
+                    environment,
+                ) {
+                    Ok(plans) => plans,
+                    Err(error) => return *error,
+                };
+            }
+            #[cfg(feature = "typed-workflow")]
+            {
+                decision.workflow_outputs = evaluator.workflow_outputs;
+            }
+            decision
+        }
         Ok(false) => *invalid(),
         Err(decision) => *decision,
     }
@@ -698,6 +1443,13 @@ fn validate_artifact(
 ) -> Result<CompiledPolicy, alloc::boxed::Box<Decision>> {
     if policy.language != crate::LANGUAGE
         || !crate::supported_registry_version(&policy.registry_version)
+        || (crate::validation::provider_call_required(&policy.ir)
+            && matches!(
+                policy.registry_version.as_str(),
+                "1.0.0" | "1.1.0" | "1.2.0"
+            ))
+        || (crate::typed_workflow::required(&policy.ir)
+            && policy.registry_version != crate::REGISTRY_VERSION)
         || digest(policy.source.as_bytes()) != policy.source_hash
         || canonical_ir_hash(&policy.ir).ok().as_ref() != Some(&policy.ir_hash)
     {
@@ -712,6 +1464,9 @@ fn validate_artifact(
         || compiled.limit != policy.limit
         || compiled.token != policy.token
         || compiled.execution_requirements != policy.execution_requirements
+        || compiled.typed_budget_requirements != policy.typed_budget_requirements
+        || compiled.typed_workflow_requirements != policy.typed_workflow_requirements
+        || compiled.provider_call_requirements != policy.provider_call_requirements
     {
         return Err(failure(
             "INVALID_ARTIFACT",
@@ -729,4 +1484,194 @@ pub fn evaluate_ir(ir: &Program, profile: Profile, ctx: &Context) -> Decision {
         Err(error) => return Decision::fail("INVALID_POLICY", error.message),
     };
     run(ir, profile, ctx, binding)
+}
+
+#[cfg(feature = "typed-workflow")]
+fn workflow_value(ty: crate::typed_workflow::WorkflowType, data: serde_json::Value) -> EvalResult {
+    use crate::typed_workflow::WorkflowType as T;
+    Ok(match ty {
+        T::U64 => Value::Integer(data.as_u64().ok_or_else(invalid)?),
+        T::Bool => Value::Boolean(data.as_bool().ok_or_else(invalid)?),
+        T::String => Value::String(data.as_str().ok_or_else(invalid)?.into()),
+        other => Value::Workflow { ty: other, data },
+    })
+}
+#[cfg(feature = "typed-workflow")]
+fn typed_value(name: &str, value: &impl serde::Serialize) -> EvalResult {
+    workflow_value(
+        crate::typed_workflow::WorkflowType::named(name),
+        serde_json::to_value(value).map_err(|_| invalid())?,
+    )
+}
+#[cfg(feature = "typed-workflow")]
+fn amount_value(value: &Value) -> Option<crate::typed_workflow::Amount256> {
+    match value {
+        Value::Integer(v) => Some((*v).into()),
+        Value::Workflow {
+            ty: crate::typed_workflow::WorkflowType::Amount256,
+            data,
+        } => serde_json::from_value(data.clone()).ok(),
+        _ => None,
+    }
+}
+#[cfg(feature = "typed-workflow")]
+fn validate_workflow_context(ctx: &Context) -> Result<(), alloc::boxed::Box<Decision>> {
+    if ctx.answers.len() > 32
+        || ctx.confidence.len() > 32
+        || ctx.confidence.keys().any(|s| s.is_empty() || s.len() > 128)
+        || ctx.answers.keys().any(|s| s.len() != 64)
+        || ctx.original_intent.len() > 16384
+        || ctx
+            .confidence
+            .values()
+            .any(|v| v.lower_bps > v.upper_bps || v.upper_bps > 10000)
+    {
+        return Err(invalid());
+    }
+    validate_runtime_context(&ctx.runtime_context)
+}
+
+#[cfg(feature = "typed-workflow")]
+fn optional_value(name: &str, value: &impl serde::Serialize) -> EvalResult {
+    workflow_value(
+        crate::typed_workflow::WorkflowType::Option(alloc::boxed::Box::new(
+            crate::typed_workflow::WorkflowType::named(name),
+        )),
+        serde_json::to_value(value).map_err(|_| invalid())?,
+    )
+}
+
+#[cfg(feature = "typed-workflow")]
+fn typed_budget_plans(
+    outputs: &[crate::typed_workflow::WorkflowOutput],
+    guards: &[crate::typed_workflow::TypedBudgetRequirement],
+    environment: &crate::typed_workflow::WorkflowEnvironment,
+) -> Result<Vec<crate::typed_workflow::TypedBudgetPlan>, alloc::boxed::Box<Decision>> {
+    use crate::typed_workflow::{
+        Amount256, TypedBudgetPlan, WorkflowAsset, WorkflowOutput, asset_identity,
+    };
+    let mut totals: BTreeMap<String, (WorkflowAsset, Amount256, Amount256, Option<u8>)> =
+        BTreeMap::new();
+    let mut add = |asset: &WorkflowAsset,
+                   debit: Amount256,
+                   fee: Amount256,
+                   decimals: Option<u8>|
+     -> Result<(), alloc::boxed::Box<Decision>> {
+        let entry = totals.entry(asset_identity(asset)).or_insert((
+            asset.clone(),
+            0.into(),
+            0.into(),
+            decimals,
+        ));
+        if entry.3.is_some() && decimals.is_some() && entry.3 != decimals {
+            return Err(failure(
+                "WORKFLOW_ASSET_MISMATCH",
+                "Conflicting authenticated decimal scales.",
+            ));
+        }
+        if decimals.is_some() {
+            entry.3 = decimals;
+        }
+        entry.1 = entry.1.checked_add(debit).ok_or_else(|| {
+            failure(
+                "WORKFLOW_AMOUNT_OVERFLOW",
+                "Complete debit sum exceeds Amount256.",
+            )
+        })?;
+        entry.2 = entry.2.checked_add(fee).ok_or_else(|| {
+            failure(
+                "WORKFLOW_AMOUNT_OVERFLOW",
+                "Complete fee sum exceeds Amount256.",
+            )
+        })?;
+        Ok(())
+    };
+    for output in outputs {
+        let fees = match output {
+            WorkflowOutput::Execution(r) => {
+                for e in &r.request.effect_bounds {
+                    if e.max_burn != Amount256::from(0) {
+                        return Err(failure(
+                            "WORKFLOW_BURN_UNSUPPORTED",
+                            "This budget profile does not admit burn effects.",
+                        ));
+                    }
+                    add(&e.asset, e.max_debit, 0.into(), None)?;
+                }
+                r.request.fee_bounds.as_ref()
+            }
+            WorkflowOutput::Payment(r) => {
+                add(
+                    &r.payment.asset,
+                    r.payment.units,
+                    0.into(),
+                    Some(r.payment.decimals),
+                )?;
+                r.fee_bounds.as_ref()
+            }
+            WorkflowOutput::FreeResponse { .. } => continue,
+        }
+        .ok_or_else(|| {
+            failure(
+                "WORKFLOW_FEES_UNRESOLVED",
+                "Final authorization requires explicit fee bounds.",
+            )
+        })?;
+        for fee in fees {
+            add(&fee.asset, 0.into(), fee.max_fee, None)?;
+        }
+    }
+    let mut plans = Vec::new();
+    for (id, (asset, debit, fee, decimals)) in totals {
+        let guard = guards.iter().find(|g| g.asset_id == id).ok_or_else(|| {
+            failure(
+                "WORKFLOW_ASSET_UNGUARDED",
+                "Every proposed debit and fee asset needs an executed owner budget guard.",
+            )
+        })?;
+        let observations: Vec<_> = environment
+            .budgets
+            .iter()
+            .filter(|b| b.budget_id == guard.budget_id)
+            .collect();
+        let [observation] = observations.as_slice() else {
+            return Err(failure(
+                "WORKFLOW_BUDGET_REQUIRED",
+                "Exactly one protected budget observation is required.",
+            ));
+        };
+        if observation.asset != asset
+            || observation.decimals != guard.decimals
+            || decimals.is_some_and(|d| d != guard.decimals)
+            || observation.limit_units != Amount256::from(guard.total_budget_units)
+        {
+            return Err(failure(
+                "WORKFLOW_ASSET_MISMATCH",
+                "Source budget must match the installed asset, scale and total limit.",
+            ));
+        }
+        if debit > guard.max_debit_units || fee > guard.max_fee_units {
+            return Err(failure(
+                "WORKFLOW_REQUEST_CAP_EXCEEDED",
+                "Complete debit or cumulative fee exceeds the owner request ceiling.",
+            ));
+        }
+        let total = debit
+            .checked_add(fee)
+            .and_then(|v| v.checked_add(observation.spent_units))
+            .and_then(|v| v.checked_add(observation.reserved_units));
+        if total.is_none_or(|v| v > observation.limit_units) {
+            return Err(failure(
+                "WORKFLOW_BUDGET_EXCEEDED",
+                "Committed consumption, other reservations and this complete request exceed the total budget.",
+            ));
+        }
+        plans.push(TypedBudgetPlan {
+            requirement: guard.clone(),
+            asset,
+            debit_units: debit,
+            fee_units: fee,
+        });
+    }
+    Ok(plans)
 }

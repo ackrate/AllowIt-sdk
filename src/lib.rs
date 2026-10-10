@@ -9,6 +9,29 @@ mod editing;
 #[cfg(feature = "compiler")]
 pub mod lsp;
 pub mod prelude;
+/// Source type-checking facade. Authoritative provider admission uses evaluated IR.
+pub mod paysh {
+    /// Direct facade evaluation has no authenticated preflight host and fails closed.
+    pub fn payment_request_from_curl(
+        _outcome: &crate::typed_workflow::CurlOutcome,
+        _request: &crate::typed_workflow::CurlRequest,
+    ) -> Result<Option<crate::typed_workflow::PaymentRequest>, crate::prelude::PolicyError> {
+        Err(crate::prelude::PolicyError {
+            code: "WORKFLOW_INPUT_REQUIRED".into(),
+            reason: "Use the authenticated host evaluator.".into(),
+        })
+    }
+    /// Direct Rust execution has no authenticated host adapter and fails closed.
+    pub fn call(
+        _service_id: &str,
+        _input_key: &str,
+        _max_payment_units: u64,
+        _max_swap_lamports: u64,
+        _max_service_fee_lamports_per_execution: u64,
+    ) -> bool {
+        false
+    }
+}
 mod protocol;
 mod readability;
 mod registry;
@@ -19,6 +42,7 @@ mod runtime;
 pub mod spending;
 #[cfg(feature = "compiler")]
 mod trace;
+pub mod typed_workflow;
 mod types;
 // The source type-checking facade uses floats; contract execution is integer-only.
 #[cfg(feature = "std")]
@@ -126,4 +150,45 @@ mod abi {
         core::mem::forget(output);
         packed
     }
+}
+
+/// Direct facade evaluation has no installed profile validator and fails closed.
+pub fn execution_request_validate(
+    _request: &typed_workflow::ExecutionRequest,
+) -> Result<typed_workflow::ValidatedExecutionRequest, prelude::PolicyError> {
+    Err(prelude::PolicyError {
+        code: "WORKFLOW_INPUT_REQUIRED".into(),
+        reason: "Use the authenticated host evaluator.".into(),
+    })
+}
+
+/// Direct budget facade has no authenticated protected accounting and fails closed.
+pub fn execution_request_cap(
+    _request: &typed_workflow::ValidatedExecutionRequest,
+    _budget_id: &str,
+    _asset_id: &str,
+    _decimals: u64,
+    _total_budget_units: u64,
+    _max_debit_units: u64,
+    _max_fee_units: u64,
+) -> prelude::PolicyResult {
+    Err(prelude::PolicyError {
+        code: "WORKFLOW_BUDGET_REQUIRED".into(),
+        reason: "Use the authenticated host evaluator.".into(),
+    })
+}
+/// Direct budget facade has no authenticated protected accounting and fails closed.
+pub fn payment_request_cap(
+    _request: &typed_workflow::PaymentRequest,
+    _budget_id: &str,
+    _asset_id: &str,
+    _decimals: u64,
+    _total_budget_units: u64,
+    _max_debit_units: u64,
+    _max_fee_units: u64,
+) -> prelude::PolicyResult {
+    Err(prelude::PolicyError {
+        code: "WORKFLOW_BUDGET_REQUIRED".into(),
+        reason: "Use the authenticated host evaluator.".into(),
+    })
 }

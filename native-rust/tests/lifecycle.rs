@@ -993,6 +993,20 @@ fn server_reconciliation_requires_no_file_journal_or_signing() {
         extra: Default::default(),
     };
     assert!(!f.directory.exists());
+    let mut untrusted = record.clone();
+    untrusted
+        .extra
+        .insert("executionRequestDigest".into(), json!("forged"));
+    untrusted
+        .extra
+        .insert("approval".into(), json!({"forged":true}));
+    untrusted
+        .extra
+        .insert("applicationNote".into(), json!("keep this"));
+    let sanitized = reconcile_record(&f, untrusted, &f.policy, owner).unwrap();
+    assert!(!sanitized.extra.contains_key("executionRequestDigest"));
+    assert!(!sanitized.extra.contains_key("approval"));
+    assert_eq!(sanitized.extra["applicationNote"], "keep this");
     let observed = reconcile_record(&f, record.clone(), &f.policy, owner).unwrap();
     assert_eq!(observed.status, "uncertain");
     assert_eq!(observed.signature, record.signature);

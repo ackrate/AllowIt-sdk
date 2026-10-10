@@ -49,6 +49,23 @@ jobs:
           name: allowit-sdk-wasm
           path: target/sdk-distribution/
 
+  tempo-sdk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tempo-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tempo-rust
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
   native-sdk:
     runs-on: ubuntu-latest
     steps:
